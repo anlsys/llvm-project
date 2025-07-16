@@ -3726,6 +3726,12 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
       SharedsSize, CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
           TaskEntry, KmpRoutineEntryPtrTy)};
   llvm::Value *NewTask;
+
+  Address DependenciesArray = Address::invalid();
+  llvm::Value *Ndeps;
+  std::tie(Ndeps, DependenciesArray) =
+      emitDependClause(CGF, Data.Dependences, Loc);
+
   if (D.hasClausesOfKind<OMPNowaitClause>()) {
     // Check if we have any device clause associated with the directive.
     const Expr *Device = nullptr;
@@ -3739,14 +3745,16 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
     else
       DeviceID = CGF.Builder.getInt64(OMP_DEVICEID_UNDEF);
     AllocArgs.push_back(DeviceID);
+    AllocArgs.push_back(Ndeps);
     NewTask = CGF.EmitRuntimeCall(
         OMPBuilder.getOrCreateRuntimeFunction(
-            CGM.getModule(), OMPRTL___kmpc_omp_target_task_alloc),
+            CGM.getModule(), OMPRTL___kmpc_omp_target_task_alloc_with_deps),
         AllocArgs);
   } else {
+    AllocArgs.push_back(Ndeps);
     NewTask =
         CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
-                                CGM.getModule(), OMPRTL___kmpc_omp_task_alloc),
+                                CGM.getModule(), OMPRTL___kmpc_omp_task_alloc_with_deps),
                             AllocArgs);
   }
   // Emit detach clause initialization.
