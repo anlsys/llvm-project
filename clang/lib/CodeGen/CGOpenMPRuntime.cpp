@@ -3719,18 +3719,32 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
                                      CGF.Builder.getInt32(FinalFlag),
                                      CGF.Builder.getInt32(/*C=*/0))
           : CGF.Builder.getInt32(Data.Final.getInt() ? FinalFlag : 0);
+  // flags
   TaskFlags = CGF.Builder.CreateOr(TaskFlags, CGF.Builder.getInt32(Flags));
-  llvm::Value *SharedsSize = CGM.getSize(C.getTypeSizeInChars(SharedsTy));
-  SmallVector<llvm::Value *, 8> AllocArgs = {emitUpdateLocation(CGF, Loc),
-      getThreadID(CGF, Loc), TaskFlags, KmpTaskTWithPrivatesTySize,
-      SharedsSize, CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
-          TaskEntry, KmpRoutineEntryPtrTy)};
-  llvm::Value *NewTask;
 
-  Address DependenciesArray = Address::invalid();
+  // shared
+  llvm::Value *SharedsSize = CGM.getSize(C.getTypeSizeInChars(SharedsTy));
+
+  // Get the number of dependencies in the depend clauses
   llvm::Value *Ndeps;
+  Address DependenciesArray = Address::invalid();
   std::tie(Ndeps, DependenciesArray) =
       emitDependClause(CGF, Data.Dependences, Loc);
+  if (Ndeps == NULL)
+      Ndeps = llvm::ConstantInt::get(CGF.Int32Ty, 0);
+
+  // Arguments of the func call
+  SmallVector<llvm::Value *, 10> AllocArgs = {
+      emitUpdateLocation(CGF, Loc),
+      getThreadID(CGF, Loc),
+      TaskFlags,
+      KmpTaskTWithPrivatesTySize,
+      SharedsSize,
+      CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(TaskEntry, KmpRoutineEntryPtrTy)
+  };
+
+  // the allocated task
+  llvm::Value *NewTask;
 
   if (D.hasClausesOfKind<OMPNowaitClause>()) {
     // Check if we have any device clause associated with the directive.
@@ -3749,12 +3763,14 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
     NewTask = CGF.EmitRuntimeCall(
         OMPBuilder.getOrCreateRuntimeFunction(
             CGM.getModule(), OMPRTL___kmpc_omp_target_task_alloc_with_deps),
+            // CGM.getModule(), OMPRTL___kmpc_omp_target_task_alloc),
         AllocArgs);
   } else {
     AllocArgs.push_back(Ndeps);
     NewTask =
         CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
                                 CGM.getModule(), OMPRTL___kmpc_omp_task_alloc_with_deps),
+                                // CGM.getModule(), OMPRTL___kmpc_omp_task_alloc),
                             AllocArgs);
   }
   // Emit detach clause initialization.
