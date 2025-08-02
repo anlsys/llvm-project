@@ -48,6 +48,10 @@ if(LLVM_HAVE_LINK_VERSION_SCRIPT)
   target_link_libraries(omptarget PRIVATE "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/exports")
 endif()
 
+find_package(XKRT  REQUIRED NO_MODULE)
+find_package(XKOMP REQUIRED NO_MODULE)
+target_link_libraries(omptarget PRIVATE XKOMP::xkomp)
+
 # Define the TARGET_NAME and DEBUG_PREFIX.
 target_compile_definitions(omptarget PRIVATE
   TARGET_NAME=omptarget
