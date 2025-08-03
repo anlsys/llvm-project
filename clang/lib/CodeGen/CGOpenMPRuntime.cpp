@@ -10563,6 +10563,7 @@ void CGOpenMPRuntime::emitTargetDataStandAloneCall(
       break;
     }
     if (HasNowait) {
+      // int32_t DepNum, void *DepList, int32_t NoAliasDepNum, void *NoAliasDepList
       OffloadingArgs.push_back(llvm::Constant::getNullValue(CGF.Int32Ty));
       OffloadingArgs.push_back(llvm::Constant::getNullValue(CGF.VoidPtrTy));
       OffloadingArgs.push_back(llvm::Constant::getNullValue(CGF.Int32Ty));

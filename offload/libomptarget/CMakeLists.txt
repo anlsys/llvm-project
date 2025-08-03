@@ -1,5 +1,13 @@
 message(STATUS "Building offloading runtime library libomptarget.")
 
+###############
+# C++ version #
+###############
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)  # Optional: disables compiler-specific extensions
+
+
 if(LIBOMP_STANDALONE)
   set(LIBOMP ${LIBOMP_STANDALONE})
 else()
@@ -16,6 +24,8 @@ add_llvm_library(omptarget
   LegacyAPI.cpp
   PluginManager.cpp
   DeviceImage.cpp
+
+  xktarget.cpp
 
   OpenMP/API.cpp
   OpenMP/Mapping.cpp
@@ -50,7 +60,7 @@ endif()
 
 find_package(XKRT  REQUIRED NO_MODULE)
 find_package(XKOMP REQUIRED NO_MODULE)
-target_link_libraries(omptarget PRIVATE XKOMP::xkomp)
+target_link_libraries(omptarget PRIVATE XKRT::xkrt XKOMP::xkomp)
 
 # Define the TARGET_NAME and DEBUG_PREFIX.
 target_compile_definitions(omptarget PRIVATE

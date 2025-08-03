@@ -18,6 +18,7 @@
 #include "PluginManager.h"
 #include "omptarget.h"
 #include "private.h"
+#include "xktarget.h"
 
 #include "Shared/EnvironmentVar.h"
 #include "Shared/Profile.h"
@@ -249,12 +250,17 @@ EXTERN void __tgt_target_data_update_nowait_mapper(
     void **Args, int64_t *ArgSizes, int64_t *ArgTypes, map_var_info_t *ArgNames,
     void **ArgMappers, int32_t DepNum, void *DepList, int32_t NoAliasDepNum,
     void *NoAliasDepList) {
+
+    # if 0
   OMPT_IF_BUILT(ReturnAddressSetterRAII RA(__builtin_return_address(0)));
   targetData<TaskAsyncInfoWrapperTy>(
       Loc, DeviceId, ArgNum, ArgsBase, Args, ArgSizes, ArgTypes, ArgNames,
       ArgMappers, targetDataUpdate,
       "Updating data within the OpenMP data region with update_nowait_mapper",
       "update");
+  # else
+  return __xktgt_target_data_update_nowait_mapper(Loc, DeviceId, ArgNum, ArgsBase, Args, ArgSizes, ArgTypes, ArgNames, ArgMappers, DepNum, DepList, NoAliasDepNum, NoAliasDepList);
+  # endif
 }
 
 static KernelArgsTy *upgradeKernelArgs(KernelArgsTy *KernelArgs,
