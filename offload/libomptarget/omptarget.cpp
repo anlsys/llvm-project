@@ -956,7 +956,6 @@ static bool isLambdaMapping(int64_t Mapping) {
   return (Mapping & LambdaMapping) == LambdaMapping;
 }
 
-namespace {
 /// Find the table information in the map or look it up in the translation
 /// tables.
 TableMap *getTableMap(void *HostPtr) {
@@ -1200,7 +1199,7 @@ public:
 /// Process data before launching the kernel, including calling targetDataBegin
 /// to map and transfer data to target device, transferring (first-)private
 /// variables.
-static int processDataBefore(ident_t *Loc, int64_t DeviceId, void *HostPtr,
+int processDataBefore(ident_t *Loc, int64_t DeviceId, void *HostPtr,
                              int32_t ArgNum, void **ArgBases, void **Args,
                              int64_t *ArgSizes, int64_t *ArgTypes,
                              map_var_info_t *ArgNames, void **ArgMappers,
@@ -1370,7 +1369,6 @@ static int processDataAfter(ident_t *Loc, int64_t DeviceId, void *HostPtr,
 
   return OFFLOAD_SUCCESS;
 }
-} // namespace
 
 /// performs the same actions as data_begin in case arg_num is
 /// non-zero and initiates run of the offloaded region on the target platform;

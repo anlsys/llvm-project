@@ -120,7 +120,7 @@ private:
 /// generic kernel class.
 struct CUDAKernelTy : public GenericKernelTy {
   /// Create a CUDA kernel with a name and an execution mode.
-  CUDAKernelTy(const char *Name) : GenericKernelTy(Name), Func(nullptr) {}
+  CUDAKernelTy(const char *Name) : GenericKernelTy(Name) {}
 
   /// Initialize the CUDA kernel.
   Error initImpl(GenericDeviceTy &GenericDevice,
@@ -129,19 +129,21 @@ struct CUDAKernelTy : public GenericKernelTy {
     CUDADeviceImageTy &CUDAImage = static_cast<CUDADeviceImageTy &>(Image);
 
     // Retrieve the function pointer of the kernel.
-    Res = cuModuleGetFunction(&Func, CUDAImage.getModule(), getName());
+    CUfunction CuFunc = (CUfunction) Func;
+    Res = cuModuleGetFunction(&CuFunc, CUDAImage.getModule(), getName());
     if (auto Err = Plugin::check(Res, "error in cuModuleGetFunction('%s'): %s",
                                  getName()))
       return Err;
+    Func = (void *) CuFunc;
 
     // Check that the function pointer is valid.
-    if (!Func)
+    if (!CuFunc)
       return Plugin::error(ErrorCode::INVALID_BINARY,
                            "invalid function for kernel %s", getName());
 
     int MaxThreads;
     Res = cuFuncGetAttribute(&MaxThreads,
-                             CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, Func);
+                             CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, CuFunc);
     if (auto Err = Plugin::check(Res, "error in cuFuncGetAttribute: %s"))
       return Err;
 
@@ -158,8 +160,6 @@ struct CUDAKernelTy : public GenericKernelTy {
                    AsyncInfoWrapperTy &AsyncInfoWrapper) const override;
 
 private:
-  /// The CUDA kernel function to execute.
-  CUfunction Func;
   /// The maximum amount of dynamic shared memory per thread group. By default,
   /// this is set to 48 KB.
   mutable uint32_t MaxDynCGroupMemLimit = 49152;
@@ -1307,17 +1307,19 @@ Error CUDAKernelTy::launchImpl(GenericDeviceTy &GenericDevice,
   if (GenericDevice.getRPCServer())
     GenericDevice.Plugin.getRPCServer().Thread->notify();
 
+  CUfunction CuFunc = (CUfunction) Func;
+
   // In case we require more memory than the current limit.
   if (MaxDynCGroupMem >= MaxDynCGroupMemLimit) {
     CUresult AttrResult = cuFuncSetAttribute(
-        Func, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, MaxDynCGroupMem);
+        CuFunc, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, MaxDynCGroupMem);
     return Plugin::check(
         AttrResult,
         "Error in cuLaunchKernel while setting the memory limits: %s");
     MaxDynCGroupMemLimit = MaxDynCGroupMem;
   }
 
-  CUresult Res = cuLaunchKernel(Func, NumBlocks[0], NumBlocks[1], NumBlocks[2],
+  CUresult Res = cuLaunchKernel(CuFunc, NumBlocks[0], NumBlocks[1], NumBlocks[2],
                                 NumThreads[0], NumThreads[1], NumThreads[2],
                                 MaxDynCGroupMem, Stream, nullptr, Config);
 

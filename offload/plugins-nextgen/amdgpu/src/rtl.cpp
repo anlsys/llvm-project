@@ -589,8 +589,6 @@ struct AMDGPUKernelTy : public GenericKernelTy {
   bool usesDynamicStack() const { return DynamicStack; }
 
 private:
-  /// The kernel object to execute.
-  uint64_t KernelObject;
 
   /// The args, group and private segments sizes required by a kernel instance.
   uint32_t ArgsSize;

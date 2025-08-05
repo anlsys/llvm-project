@@ -263,7 +263,7 @@ EXTERN void __tgt_target_data_update_nowait_mapper(
   # endif
 }
 
-static KernelArgsTy *upgradeKernelArgs(KernelArgsTy *KernelArgs,
+KernelArgsTy *upgradeKernelArgs(KernelArgsTy *KernelArgs,
                                        KernelArgsTy &LocalKernelArgs,
                                        int32_t NumTeams, int32_t ThreadLimit) {
   if (KernelArgs->Version > OMP_KERNEL_ARG_VERSION)
@@ -399,8 +399,14 @@ EXTERN int __tgt_target_kernel(ident_t *Loc, int64_t DeviceId, int32_t NumTeams,
                                KernelArgsTy *KernelArgs) {
   OMPT_IF_BUILT(ReturnAddressSetterRAII RA(__builtin_return_address(0)));
   if (KernelArgs->Flags.NoWait)
+  {
+    # if 0
     return targetKernel<TaskAsyncInfoWrapperTy>(
         Loc, DeviceId, NumTeams, ThreadLimit, HostPtr, KernelArgs);
+    # else
+    return __xktgt_target_kernel(Loc, DeviceId, NumTeams, ThreadLimit, HostPtr, KernelArgs);
+    # endif
+  }
   return targetKernel<AsyncInfoTy>(Loc, DeviceId, NumTeams, ThreadLimit,
                                    HostPtr, KernelArgs);
 }

@@ -296,7 +296,7 @@ public:
 struct GenericKernelTy {
   /// Construct a kernel with a name and a execution mode.
   GenericKernelTy(const char *Name)
-      : Name(Name), PreferredNumThreads(0), MaxNumThreads(0) {}
+      : Func(nullptr), Name(Name), PreferredNumThreads(0), MaxNumThreads(0) {}
 
   virtual ~GenericKernelTy() {}
 
@@ -347,6 +347,21 @@ struct GenericKernelTy {
     return false;
   }
 
+public:
+
+  /// Prepare the arguments before launching the kernel.
+  KernelLaunchParamsTy
+  prepareArgs(GenericDeviceTy &GenericDevice, void **ArgPtrs,
+              ptrdiff_t *ArgOffsets, uint32_t &NumArgs,
+              llvm::SmallVectorImpl<void *> &Args,
+              llvm::SmallVectorImpl<void *> &Ptrs,
+              KernelLaunchEnvironmentTy *KernelLaunchEnvironment) const;
+
+  union {
+      void * Func;
+      uint64_t KernelObject;
+  };
+
 protected:
   /// Get the execution mode name of the kernel.
   const char *getExecutionModeName() const {
@@ -376,13 +391,6 @@ protected:
                                        uint32_t NumBlocks[3]) const;
 
 private:
-  /// Prepare the arguments before launching the kernel.
-  KernelLaunchParamsTy
-  prepareArgs(GenericDeviceTy &GenericDevice, void **ArgPtrs,
-              ptrdiff_t *ArgOffsets, uint32_t &NumArgs,
-              llvm::SmallVectorImpl<void *> &Args,
-              llvm::SmallVectorImpl<void *> &Ptrs,
-              KernelLaunchEnvironmentTy *KernelLaunchEnvironment) const;
 
   /// Get the number of threads and blocks for the kernel based on the
   /// user-defined threads and block clauses.
