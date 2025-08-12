@@ -357,6 +357,22 @@ public:
               llvm::SmallVectorImpl<void *> &Ptrs,
               KernelLaunchEnvironmentTy *KernelLaunchEnvironment) const;
 
+  bool isBareMode() const {
+    return KernelEnvironment.Configuration.ExecMode == OMP_TGT_EXEC_MODE_BARE;
+  }
+
+  /// Get the number of threads and blocks for the kernel based on the
+  /// user-defined threads and block clauses.
+  uint32_t getNumThreads(GenericDeviceTy &GenericDevice,
+                         uint32_t ThreadLimitClause[3]) const;
+
+  /// The number of threads \p NumThreads can be adjusted by this method.
+  /// \p IsNumThreadsFromUser is true is \p NumThreads is defined by user via
+  /// thread_limit clause.
+  uint32_t getNumBlocks(GenericDeviceTy &GenericDevice,
+                        uint32_t BlockLimitClause[3], uint64_t LoopTripCount,
+                        uint32_t &NumThreads, bool IsNumThreadsFromUser) const;
+
   union {
       void * Func;
       uint64_t KernelObject;
@@ -392,18 +408,6 @@ protected:
 
 private:
 
-  /// Get the number of threads and blocks for the kernel based on the
-  /// user-defined threads and block clauses.
-  uint32_t getNumThreads(GenericDeviceTy &GenericDevice,
-                         uint32_t ThreadLimitClause[3]) const;
-
-  /// The number of threads \p NumThreads can be adjusted by this method.
-  /// \p IsNumThreadsFromUser is true is \p NumThreads is defined by user via
-  /// thread_limit clause.
-  uint32_t getNumBlocks(GenericDeviceTy &GenericDevice,
-                        uint32_t BlockLimitClause[3], uint64_t LoopTripCount,
-                        uint32_t &NumThreads, bool IsNumThreadsFromUser) const;
-
   /// Indicate if the kernel works in Generic SPMD, Generic or SPMD mode.
   bool isGenericSPMDMode() const {
     return KernelEnvironment.Configuration.ExecMode ==
@@ -415,9 +419,6 @@ private:
   }
   bool isSPMDMode() const {
     return KernelEnvironment.Configuration.ExecMode == OMP_TGT_EXEC_MODE_SPMD;
-  }
-  bool isBareMode() const {
-    return KernelEnvironment.Configuration.ExecMode == OMP_TGT_EXEC_MODE_BARE;
   }
 
   /// The kernel name.

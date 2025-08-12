@@ -31,6 +31,8 @@ KernelArgsTy * upgradeKernelArgs(
     int32_t ThreadLimit
 );
 
+
+
 int
 __xktgt_target_kernel(
     void *Loc,
@@ -83,66 +85,80 @@ __xktgt_target_kernel(
     GenericKernelTy & GenericKernel = *reinterpret_cast<GenericKernelTy *>(TgtEntryPtr);
 
     // pack args to pass to the kernel launch
-    KernelLaunchParamsTy LaunchParams;
     llvm::SmallVector<void *, 16> Args;
     llvm::SmallVector<void *, 16> Ptrs;
 
     if (KernelArgs->Flags.IsCUDA)
         LOGGER_FATAL("Not supported");
-    else
+
+    // processDataBefore
+    llvm::SmallVector<void *> TgtArgs;
+    llvm::SmallVector<ptrdiff_t> TgtOffsets;
+
+    int NumClangLaunchArgs = KernelArgs->NumArgs;
+    for (int32_t i = 0; i < NumClangLaunchArgs ; ++i)
     {
-        llvm::SmallVector<void *> TgtArgs;
-        llvm::SmallVector<ptrdiff_t> TgtOffsets;
+        assert(KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_TARGET_PARAM);
+        void *HstPtrBegin = KernelArgs->ArgPtrs[i];
+        void *HstPtrBase = KernelArgs->ArgBasePtrs[i];
+        void *TgtPtrBegin;
+        ptrdiff_t TgtBaseOffset;
+        TargetPointerResultTy TPR;
 
-        int NumClangLaunchArgs = KernelArgs->NumArgs;
-        for (int32_t i = 0; i < NumClangLaunchArgs ; ++i)
+        if (KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_LITERAL)
         {
-            assert(KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_TARGET_PARAM);
-            void *HstPtrBegin = KernelArgs->ArgPtrs[i];
-            void *HstPtrBase = KernelArgs->ArgBasePtrs[i];
-            void *TgtPtrBegin;
-            ptrdiff_t TgtBaseOffset;
-            TargetPointerResultTy TPR;
-
-            if (KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_LITERAL)
-            {
-                TgtPtrBegin = HstPtrBase;
-                TgtBaseOffset = 0;
-            }
-            else if (KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_PRIVATE)
-            {
-                TgtBaseOffset = (intptr_t)HstPtrBase - (intptr_t)HstPtrBegin;
-                const bool IsFirstPrivate = (KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_TO);
-                if (IsFirstPrivate)
-                    LOGGER_FATAL("Not supported");
-                TgtPtrBegin = NULL;
-                TgtBaseOffset = 0;
-            }
-            else
-            {
-                if (KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_PTR_AND_OBJ)
-                    HstPtrBase = *reinterpret_cast<void **>(HstPtrBase);
-                TPR = DeviceOrErr->getMappingInfo().getTgtPtrBegin(
-                        HstPtrBegin, KernelArgs->ArgSizes[i],
-                        /*UpdateRefCount=*/false,
-                        /*UseHoldRefCount=*/false);
-                TgtPtrBegin = TPR.TargetPointer;
-                TgtBaseOffset = (intptr_t)HstPtrBase - (intptr_t)HstPtrBegin;
-            }
-            TgtArgs.push_back(TgtPtrBegin);
-            TgtOffsets.push_back(TgtBaseOffset);
+            TgtPtrBegin = HstPtrBase;
+            TgtBaseOffset = 0;
         }
-
-        void ** ArgPtrs = TgtArgs.data();
-        ptrdiff_t * ArgOffsets = TgtOffsets.data();
-
-        KernelArgs->NumArgs = TgtArgs.size();
-
-        LaunchParams = GenericKernel.prepareArgs(GenericDevice, ArgPtrs, ArgOffsets, KernelArgs->NumArgs, Args, Ptrs, NULL);
+        else if (KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_PRIVATE)
+        {
+            TgtBaseOffset = (intptr_t)HstPtrBase - (intptr_t)HstPtrBegin;
+            const bool IsFirstPrivate = (KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_TO);
+            if (IsFirstPrivate)
+                LOGGER_FATAL("Not supported");
+            TgtPtrBegin = NULL;
+            TgtBaseOffset = 0;
+        }
+        else
+        {
+            if (KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_PTR_AND_OBJ)
+                HstPtrBase = *reinterpret_cast<void **>(HstPtrBase);
+            TPR = DeviceOrErr->getMappingInfo().getTgtPtrBegin(
+                    HstPtrBegin, KernelArgs->ArgSizes[i],
+                    /*UpdateRefCount=*/false,
+                    /*UseHoldRefCount=*/false);
+            TgtPtrBegin = TPR.TargetPointer;
+            TgtBaseOffset = (intptr_t)HstPtrBase - (intptr_t)HstPtrBegin;
+        }
+        TgtArgs.push_back(TgtPtrBegin);
+        TgtOffsets.push_back(TgtBaseOffset);
     }
+
+    void ** ArgPtrs = TgtArgs.data();
+    ptrdiff_t * ArgOffsets = TgtOffsets.data();
+
+    KernelArgs->NumArgs = TgtArgs.size();
+
+    // getKernelLaunchEnvironment
+    // assert(!GenericKernel.KernelEnvironment.Configuration.ReductionDataSize ||
+    //         !GenericKernel.KernelEnvironment.Configuration.ReductionBufferLength);
+
+    KernelLaunchEnvironmentTy * KernelLaunchEnvironment = reinterpret_cast<KernelLaunchEnvironmentTy *>(~0);
+    assert(KernelLaunchEnvironment);
+
+    // prepareArgs
+    KernelLaunchParamsTy LaunchParams = GenericKernel.prepareArgs(GenericDevice, ArgPtrs, ArgOffsets, KernelArgs->NumArgs, Args, Ptrs, KernelLaunchEnvironment);
 
     // shared memory for cuda
     const unsigned int sharedmemory = KernelArgs->DynCGroupMem;
+
+    uint32_t NumThreads[3] = {KernelArgs->ThreadLimit[0], KernelArgs->ThreadLimit[1], KernelArgs->ThreadLimit[2]};
+    uint32_t NumBlocks[3] = {KernelArgs->NumTeams[0], KernelArgs->NumTeams[1], KernelArgs->NumTeams[2]};
+    if (!GenericKernel.isBareMode())
+    {
+        NumThreads[0] = GenericKernel.getNumThreads(GenericDevice, NumThreads);
+        NumBlocks[0]  = GenericKernel.getNumBlocks(GenericDevice, NumBlocks, KernelArgs->Tripcount, NumThreads[0], KernelArgs->ThreadLimit[0] > 0);
+    }
 
     // launch the kernel
     xkrt_device_global_id_t device_global_id = (xkrt_device_global_id_t) (DeviceId + 1);
@@ -159,8 +175,8 @@ __xktgt_target_kernel(
         xkomp_current_stream(),
         xkomp_current_stream_instruction_counter(),
         fn,
-        KernelArgs->NumTeams[0],    KernelArgs->NumTeams[1],    KernelArgs->NumTeams[2],
-        KernelArgs->ThreadLimit[0], KernelArgs->ThreadLimit[1], KernelArgs->ThreadLimit[2],
+        NumBlocks[0],  NumBlocks[1],  NumBlocks[2],
+        NumThreads[0], NumThreads[1], NumThreads[2],
         sharedmemory,
         LaunchParams.Data,  // array of pointer
         LaunchParams.Size   // size of array in bytes
