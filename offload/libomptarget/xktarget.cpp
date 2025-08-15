@@ -168,7 +168,15 @@ __xktgt_target_kernel(
     xkrt_driver_t * driver = xkomp->runtime.driver_get(device->driver_type);
     assert(driver);
 
+    // TODO: instead of the `xkomp_current_*()` hacks, they should be passed as
+    // function parameters by the compiler
+
     # if XKOMP_HACK_TARGET_CALL
+
+    // increment counter, as we are submitting a kernel instruction
+    task_t * task = xkomp_current_task();
+    xkomp->runtime.task_detachable_incr(task);
+
     // launch kernel
     const xkrt_driver_module_fn_t * fn = (const xkrt_driver_module_fn_t *) GenericKernel.Func;
     driver->f_kernel_launch(
@@ -184,8 +192,6 @@ __xktgt_target_kernel(
     # else /* XKOMP_HACK_TARGET_CALL */
     LOGGER_FATAL("TODO");
     # endif /* XKOMP_HACK_TARGET_CALL */
-
-    LOGGER_FATAL("TODO: Launch kernel");
 
     return 0;
 }
@@ -254,19 +260,23 @@ __xktgt_target_data_update_nowait_mapper(
             return ;
         }
 
-        // if map(to: _)
-        if (ArgType & OMP_TGT_MAPTYPE_TO)
+        // if map(to: _) or map(from: _)
+        if ((ArgType & OMP_TGT_MAPTYPE_TO) || (ArgType & OMP_TGT_MAPTYPE_FROM))
         {
             // increment counter, as we are submitting an instruction, to defer
             // task completion to instruction completion
             xkomp->runtime.task_detachable_incr(task);
 
             // retrieve xkrt device
-            const xkrt_device_global_id_t dst_device_global_id = (xkrt_device_global_id_t) (DeviceId + 1);
-            xkrt_device_t * device = xkomp->runtime.device_get(dst_device_global_id);
+            const xkrt_device_global_id_t device_global_id = (xkrt_device_global_id_t) (DeviceId + 1);
+            xkrt_device_t * device = xkomp->runtime.device_get(device_global_id);
             assert(device);
 
-            const xkrt_device_global_id_t src_device_global_id = HOST_DEVICE_GLOBAL_ID;
+            const xkrt_device_global_id_t dst_device_global_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? device_global_id      : HOST_DEVICE_GLOBAL_ID;
+            const xkrt_device_global_id_t src_device_global_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? HOST_DEVICE_GLOBAL_ID : device_global_id;
+
+            const uintptr_t dst_ptr = (const uintptr_t) ((ArgType & OMP_TGT_MAPTYPE_TO) ? TgtPtrBegin : HstPtrBegin);
+            const uintptr_t src_ptr = (const uintptr_t) ((ArgType & OMP_TGT_MAPTYPE_TO) ? HstPtrBegin : TgtPtrBegin);
 
             xkrt_callback_t callback;
             callback.func = __xktgt_instruction_completed;
@@ -276,17 +286,11 @@ __xktgt_target_data_update_nowait_mapper(
             device->offloader_stream_instruction_submit_copy<size_t, uintptr_t>(
                 (size_t) ArgSize,
                 dst_device_global_id,
-                (const uintptr_t) TgtPtrBegin,
+                dst_ptr,
                 src_device_global_id,
-                (const uintptr_t) HstPtrBegin,
+                src_ptr,
                 callback
             );
-        }
-
-        // if map(from: _)
-        if (ArgType & OMP_TGT_MAPTYPE_FROM)
-        {
-            LOGGER_FATAL("TODO: submit a k-instruction here - memcpy1d(dst=HstPtrBegin, src=TgtPtrBegin, size=ArgSize");
         }
     }
 }
