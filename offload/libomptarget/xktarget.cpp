@@ -6,6 +6,8 @@
 # include "Shared/APITypes.h"
 # include "xktarget.h"
 
+XKRT_NAMESPACE_USE;
+
 static void
 __xktgt_instruction_completed(void * vargs [XKRT_CALLBACK_ARGS_MAX])
 {
@@ -161,11 +163,11 @@ __xktgt_target_kernel(
     }
 
     // launch the kernel
-    xkrt_device_global_id_t device_global_id = (xkrt_device_global_id_t) (DeviceId + 1);
-    xkrt_device_t * device = xkomp->runtime.device_get(device_global_id);
+    device_global_id_t device_global_id = (device_global_id_t) (DeviceId + 1);
+    device_t * device = xkomp->runtime.device_get(device_global_id);
     assert(device);
 
-    xkrt_driver_t * driver = xkomp->runtime.driver_get(device->driver_type);
+    driver_t * driver = xkomp->runtime.driver_get(device->driver_type);
     assert(driver);
 
     // TODO: instead of the `xkomp_current_*()` hacks, they should be passed as
@@ -178,7 +180,7 @@ __xktgt_target_kernel(
     xkomp->runtime.task_detachable_incr(task);
 
     // launch kernel
-    const xkrt_driver_module_fn_t * fn = (const xkrt_driver_module_fn_t *) GenericKernel.Func;
+    const driver_module_fn_t * fn = (const driver_module_fn_t *) GenericKernel.Func;
     driver->f_kernel_launch(
         xkomp_current_stream(),
         xkomp_current_stream_instruction_counter(),
@@ -268,17 +270,17 @@ __xktgt_target_data_update_nowait_mapper(
             xkomp->runtime.task_detachable_incr(task);
 
             // retrieve xkrt device
-            const xkrt_device_global_id_t device_global_id = (xkrt_device_global_id_t) (DeviceId + 1);
-            xkrt_device_t * device = xkomp->runtime.device_get(device_global_id);
+            const device_global_id_t device_global_id = (device_global_id_t) (DeviceId + 1);
+            device_t * device = xkomp->runtime.device_get(device_global_id);
             assert(device);
 
-            const xkrt_device_global_id_t dst_device_global_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? device_global_id      : HOST_DEVICE_GLOBAL_ID;
-            const xkrt_device_global_id_t src_device_global_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? HOST_DEVICE_GLOBAL_ID : device_global_id;
+            const device_global_id_t dst_device_global_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? device_global_id      : HOST_DEVICE_GLOBAL_ID;
+            const device_global_id_t src_device_global_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? HOST_DEVICE_GLOBAL_ID : device_global_id;
 
             const uintptr_t dst_ptr = (const uintptr_t) ((ArgType & OMP_TGT_MAPTYPE_TO) ? TgtPtrBegin : HstPtrBegin);
             const uintptr_t src_ptr = (const uintptr_t) ((ArgType & OMP_TGT_MAPTYPE_TO) ? HstPtrBegin : TgtPtrBegin);
 
-            xkrt_callback_t callback;
+            callback_t callback;
             callback.func = __xktgt_instruction_completed;
             callback.args[0] = xkomp;
             callback.args[1] = task;
