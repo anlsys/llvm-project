@@ -9,7 +9,7 @@
 XKRT_NAMESPACE_USE;
 
 static void
-__xktgt_instruction_completed(void * vargs [XKRT_CALLBACK_ARGS_MAX])
+__xktgt_command_completed(void * vargs [XKRT_CALLBACK_ARGS_MAX])
 {
     xkomp_t * xkomp = (xkomp_t *) vargs[0];
     assert(xkomp);
@@ -175,15 +175,15 @@ __xktgt_target_kernel(
 
     # if XKOMP_HACK_TARGET_CALL
 
-    // increment counter, as we are submitting a kernel instruction
+    // increment counter, as we are submitting a kernel command
     task_t * task = xkomp_current_task();
     xkomp->runtime.task_detachable_incr(task);
 
     // launch kernel
     const driver_module_fn_t * fn = (const driver_module_fn_t *) GenericKernel.Func;
     driver->f_kernel_launch(
-        xkomp_current_stream(),
-        xkomp_current_stream_instruction_counter(),
+        xkomp_current_queue(),
+        xkomp_current_queue_command_list_counter(),
         fn,
         NumBlocks[0],  NumBlocks[1],  NumBlocks[2],
         NumThreads[0], NumThreads[1], NumThreads[2],
@@ -225,7 +225,7 @@ __xktgt_target_data_update_nowait_mapper(
     task_t * task = xkomp_current_task();
     assert(task);
     # else /* XKOMP_HACK_TARGET_CALL */
-    LOGGER_FATAL("`XKOMP_HACK_TARGET_CALL` disabled - enable it or implement codegen in llvm to pass the stream and instruction index to target calls");
+    LOGGER_FATAL("`XKOMP_HACK_TARGET_CALL` disabled - enable it or implement codegen in llvm to pass the queue and command index to target calls");
     # endif /* XKOMP_HACK_TARGET_CALL */
 
     auto DeviceOrErr = PM->getDevice(DeviceId);
@@ -245,7 +245,7 @@ __xktgt_target_data_update_nowait_mapper(
         // only support continuous transfer for now
         assert(!(ArgTypes[i] & OMP_TGT_MAPTYPE_NON_CONTIG));
 
-        // launch instruction
+        // launch command
         void * HstPtrBegin = Args[i];
         int64_t ArgSize = ArgSizes[i];
         int64_t ArgType = ArgTypes[i];
@@ -265,8 +265,8 @@ __xktgt_target_data_update_nowait_mapper(
         // if map(to: _) or map(from: _)
         if ((ArgType & OMP_TGT_MAPTYPE_TO) || (ArgType & OMP_TGT_MAPTYPE_FROM))
         {
-            // increment counter, as we are submitting an instruction, to defer
-            // task completion to instruction completion
+            // increment counter, as we are submitting an command, to defer
+            // task completion to command completion
             xkomp->runtime.task_detachable_incr(task);
 
             // retrieve xkrt device
@@ -281,11 +281,11 @@ __xktgt_target_data_update_nowait_mapper(
             const uintptr_t src_ptr = (const uintptr_t) ((ArgType & OMP_TGT_MAPTYPE_TO) ? HstPtrBegin : TgtPtrBegin);
 
             callback_t callback;
-            callback.func = __xktgt_instruction_completed;
+            callback.func = __xktgt_command_completed;
             callback.args[0] = xkomp;
             callback.args[1] = task;
 
-            device->offloader_stream_instruction_submit_copy<size_t, uintptr_t>(
+            device->offloader_queue_command_submit_copy<size_t, uintptr_t>(
                 (size_t) ArgSize,
                 dst_device_global_id,
                 dst_ptr,
