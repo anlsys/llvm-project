@@ -8,18 +8,6 @@
 
 XKRT_NAMESPACE_USE;
 
-static void
-__xktgt_command_completed(void * vargs [XKRT_CALLBACK_ARGS_MAX])
-{
-    xkomp_t * xkomp = (xkomp_t *) vargs[0];
-    assert(xkomp);
-
-    task_t * task = (task_t *) vargs[1];
-    assert(task);
-
-    xkomp->runtime.task_detachable_decr(task);
-}
-
 TableMap *getTableMap(void *HostPtr);
 
 ////////////////
@@ -32,8 +20,6 @@ KernelArgsTy * upgradeKernelArgs(
     int32_t NumTeams,
     int32_t ThreadLimit
 );
-
-
 
 int
 __xktgt_target_kernel(
@@ -170,30 +156,28 @@ __xktgt_target_kernel(
     driver_t * driver = xkomp->runtime.driver_get(device->driver_type);
     assert(driver);
 
-    // TODO: instead of the `xkomp_current_*()` hacks, they should be passed as
-    // function parameters by the compiler
+    // TODO: support shared memory
 
-    # if XKOMP_HACK_TARGET_CALL
-
-    // increment counter, as we are submitting a kernel command
-    task_t * task = xkomp_current_task();
-    xkomp->runtime.task_detachable_incr(task);
-
-    // launch kernel
-    const driver_module_fn_t * fn = (const driver_module_fn_t *) GenericKernel.Func;
-    driver->f_kernel_launch(
-        xkomp_current_queue(),
-        xkomp_current_queue_command_list_counter(),
-        fn,
-        NumBlocks[0],  NumBlocks[1],  NumBlocks[2],
-        NumThreads[0], NumThreads[1], NumThreads[2],
-        sharedmemory,
-        LaunchParams.Data,  // array of pointer
-        LaunchParams.Size   // size of array in bytes
+    constexpr queue_type_t   qtype = XKRT_QUEUE_TYPE_KERN;
+    constexpr command_type_t ctype = XKRT_COMMAND_TYPE_KERN;
+    constexpr bool           sync  = false;
+    xkomp->runtime.task_emit_command(
+        device_global_id,
+        qtype,
+        ctype,
+        sync,
+        [&] (command_t * cmd) {
+            cmd->kern.fn        = GenericKernel.Func;
+            cmd->kern.grid.x    = NumBlocks[0];
+            cmd->kern.grid.y    = NumBlocks[1];
+            cmd->kern.grid.z    = NumBlocks[2];
+            cmd->kern.block.x   = NumThreads[0];
+            cmd->kern.block.y   = NumThreads[1];
+            cmd->kern.block.z   = NumThreads[2];
+            cmd->kern.args      = LaunchParams.Data;
+            cmd->kern.args_size = LaunchParams.Size;
+        }
     );
-    # else /* XKOMP_HACK_TARGET_CALL */
-    LOGGER_FATAL("TODO");
-    # endif /* XKOMP_HACK_TARGET_CALL */
 
     return 0;
 }
@@ -220,13 +204,6 @@ __xktgt_target_data_update_nowait_mapper(
 ) {
     xkomp_t * xkomp = xkomp_get();
     assert(xkomp);
-
-    # if XKOMP_HACK_TARGET_CALL
-    task_t * task = xkomp_current_task();
-    assert(task);
-    # else /* XKOMP_HACK_TARGET_CALL */
-    LOGGER_FATAL("`XKOMP_HACK_TARGET_CALL` disabled - enable it or implement codegen in llvm to pass the queue and command index to target calls");
-    # endif /* XKOMP_HACK_TARGET_CALL */
 
     auto DeviceOrErr = PM->getDevice(DeviceId);
     if (!DeviceOrErr)
@@ -265,33 +242,34 @@ __xktgt_target_data_update_nowait_mapper(
         // if map(to: _) or map(from: _)
         if ((ArgType & OMP_TGT_MAPTYPE_TO) || (ArgType & OMP_TGT_MAPTYPE_FROM))
         {
-            // increment counter, as we are submitting an command, to defer
-            // task completion to command completion
-            xkomp->runtime.task_detachable_incr(task);
-
             // retrieve xkrt device
             const device_global_id_t device_global_id = (device_global_id_t) (DeviceId + 1);
-            device_t * device = xkomp->runtime.device_get(device_global_id);
-            assert(device);
 
-            const device_global_id_t dst_device_global_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? device_global_id      : HOST_DEVICE_GLOBAL_ID;
-            const device_global_id_t src_device_global_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? HOST_DEVICE_GLOBAL_ID : device_global_id;
+            // // src/dst devices
+            // const device_global_id_t dst_device_global_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? device_global_id      : HOST_DEVICE_GLOBAL_ID;
+            // const device_global_id_t src_device_global_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? HOST_DEVICE_GLOBAL_ID : device_global_id;
 
+            // src/dst pointers
             const uintptr_t dst_ptr = (const uintptr_t) ((ArgType & OMP_TGT_MAPTYPE_TO) ? TgtPtrBegin : HstPtrBegin);
             const uintptr_t src_ptr = (const uintptr_t) ((ArgType & OMP_TGT_MAPTYPE_TO) ? HstPtrBegin : TgtPtrBegin);
 
-            callback_t callback;
-            callback.func = __xktgt_command_completed;
-            callback.args[0] = xkomp;
-            callback.args[1] = task;
+            // queue/command type
+            const queue_type_t   qtype = (ArgType & OMP_TGT_MAPTYPE_TO) ? XKRT_QUEUE_TYPE_H2D           : XKRT_QUEUE_TYPE_D2H;
+            const command_type_t ctype = (ArgType & OMP_TGT_MAPTYPE_TO) ? XKRT_COMMAND_TYPE_COPY_H2D_1D : XKRT_COMMAND_TYPE_COPY_D2H_1D;
 
-            device->offloader_queue_command_submit_copy<size_t, uintptr_t>(
-                (size_t) ArgSize,
-                dst_device_global_id,
-                dst_ptr,
-                src_device_global_id,
-                src_ptr,
-                callback
+            // whether the progression thread should use sync or event based APIs
+            constexpr bool sync  = false;
+
+            xkomp->runtime.task_emit_command(
+                device_global_id,
+                qtype,
+                ctype,
+                sync,
+                [&] (command_t * cmd) {
+                    cmd->copy_1D.size            = (size_t) ArgSize;
+                    cmd->copy_1D.dst_device_addr = dst_ptr;
+                    cmd->copy_1D.src_device_addr = src_ptr;
+                }
             );
         }
     }
