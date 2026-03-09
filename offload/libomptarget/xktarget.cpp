@@ -160,12 +160,12 @@ __xktgt_target_kernel(
 
     constexpr queue_type_t   qtype = XKRT_QUEUE_TYPE_KERN;
     constexpr command_type_t ctype = XKRT_COMMAND_TYPE_KERN;
-    constexpr bool           sync  = false;
+    constexpr command_flag_t flags = COMMAND_FLAG_NONE;
     xkomp->runtime.task_emit_command(
         device_global_id,
         qtype,
         ctype,
-        sync,
+        flags,
         [&] (command_t * cmd) {
             cmd->kern.fn        = GenericKernel.Func;
             cmd->kern.grid.x    = NumBlocks[0];
@@ -256,15 +256,13 @@ __xktgt_target_data_update_nowait_mapper(
             // queue/command type
             const queue_type_t   qtype = (ArgType & OMP_TGT_MAPTYPE_TO) ? XKRT_QUEUE_TYPE_H2D           : XKRT_QUEUE_TYPE_D2H;
             const command_type_t ctype = (ArgType & OMP_TGT_MAPTYPE_TO) ? XKRT_COMMAND_TYPE_COPY_H2D_1D : XKRT_COMMAND_TYPE_COPY_D2H_1D;
-
-            // whether the progression thread should use sync or event based APIs
-            constexpr bool sync  = false;
+            constexpr command_flag_t flags = COMMAND_FLAG_NONE;
 
             xkomp->runtime.task_emit_command(
                 device_global_id,
                 qtype,
                 ctype,
-                sync,
+                flags,
                 [&] (command_t * cmd) {
                     cmd->copy_1D.size            = (size_t) ArgSize;
                     cmd->copy_1D.dst_device_addr = dst_ptr;
