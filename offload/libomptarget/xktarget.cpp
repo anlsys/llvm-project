@@ -138,7 +138,7 @@ __xktgt_target_kernel(
     KernelLaunchParamsTy LaunchParams = GenericKernel.prepareArgs(GenericDevice, ArgPtrs, ArgOffsets, KernelArgs->NumArgs, Args, Ptrs, KernelLaunchEnvironment);
 
     // shared memory for cuda
-    const unsigned int sharedmemory = KernelArgs->DynCGroupMem;
+    // const unsigned int sharedmemory = KernelArgs->DynCGroupMem;
 
     uint32_t NumThreads[3] = {KernelArgs->ThreadLimit[0], KernelArgs->ThreadLimit[1], KernelArgs->ThreadLimit[2]};
     uint32_t NumBlocks[3] = {KernelArgs->NumTeams[0], KernelArgs->NumTeams[1], KernelArgs->NumTeams[2]};
@@ -150,17 +150,18 @@ __xktgt_target_kernel(
 
     // launch the kernel
     device_global_id_t device_global_id = (device_global_id_t) (DeviceId + 1);
-    device_t * device = xkomp->runtime.device_get(device_global_id);
-    assert(device);
 
-    driver_t * driver = xkomp->runtime.driver_get(device->driver_type);
-    assert(driver);
+    // device_t * device = xkomp->runtime.device_get(device_global_id);
+    // assert(device);
+
+    // driver_t * driver = xkomp->runtime.driver_get(device->driver_type);
+    // assert(driver);
 
     // TODO: support shared memory
 
-    constexpr queue_type_t   qtype = XKRT_QUEUE_TYPE_KERN;
-    constexpr command_type_t ctype = XKRT_COMMAND_TYPE_KERN;
-    constexpr command_flag_t flags = COMMAND_FLAG_NONE;
+    constexpr command_queue_type_t qtype = XKRT_QUEUE_TYPE_KERN;
+    constexpr command_type_t       ctype = COMMAND_TYPE_KERN;
+    constexpr command_flag_t       flags = COMMAND_FLAG_NONE;
     xkomp->runtime.task_emit_command(
         device_global_id,
         qtype,
@@ -245,18 +246,18 @@ __xktgt_target_data_update_nowait_mapper(
             // retrieve xkrt device
             const device_global_id_t device_global_id = (device_global_id_t) (DeviceId + 1);
 
-            // // src/dst devices
-            // const device_global_id_t dst_device_global_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? device_global_id      : HOST_DEVICE_GLOBAL_ID;
-            // const device_global_id_t src_device_global_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? HOST_DEVICE_GLOBAL_ID : device_global_id;
+            // src/dst devices
+            const device_global_id_t src_device_global_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? HOST_DEVICE_GLOBAL_ID : device_global_id;
+            const device_global_id_t dst_device_global_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? device_global_id      : HOST_DEVICE_GLOBAL_ID;
 
             // src/dst pointers
             const uintptr_t dst_ptr = (const uintptr_t) ((ArgType & OMP_TGT_MAPTYPE_TO) ? TgtPtrBegin : HstPtrBegin);
             const uintptr_t src_ptr = (const uintptr_t) ((ArgType & OMP_TGT_MAPTYPE_TO) ? HstPtrBegin : TgtPtrBegin);
 
             // queue/command type
-            const queue_type_t   qtype = (ArgType & OMP_TGT_MAPTYPE_TO) ? XKRT_QUEUE_TYPE_H2D           : XKRT_QUEUE_TYPE_D2H;
-            const command_type_t ctype = (ArgType & OMP_TGT_MAPTYPE_TO) ? XKRT_COMMAND_TYPE_COPY_H2D_1D : XKRT_COMMAND_TYPE_COPY_D2H_1D;
-            constexpr command_flag_t flags = COMMAND_FLAG_NONE;
+            const command_queue_type_t qtype = (ArgType & OMP_TGT_MAPTYPE_TO) ? XKRT_QUEUE_TYPE_H2D      : XKRT_QUEUE_TYPE_D2H;
+            const command_type_t       ctype = (ArgType & OMP_TGT_MAPTYPE_TO) ? COMMAND_TYPE_COPY_H2D_1D : COMMAND_TYPE_COPY_D2H_1D;
+            constexpr command_flag_t   flags = COMMAND_FLAG_NONE;
 
             xkomp->runtime.task_emit_command(
                 device_global_id,
@@ -264,9 +265,11 @@ __xktgt_target_data_update_nowait_mapper(
                 ctype,
                 flags,
                 [&] (command_t * cmd) {
-                    cmd->copy_1D.size            = (size_t) ArgSize;
-                    cmd->copy_1D.dst_device_addr = dst_ptr;
-                    cmd->copy_1D.src_device_addr = src_ptr;
+                    cmd->copy_1D.src_device_global_id   = src_device_global_id;
+                    cmd->copy_1D.dst_device_global_id   = dst_device_global_id;
+                    cmd->copy_1D.src_device_addr        = src_ptr;
+                    cmd->copy_1D.dst_device_addr        = dst_ptr;
+                    cmd->copy_1D.size                   = (size_t) ArgSize;
                 }
             );
         }
