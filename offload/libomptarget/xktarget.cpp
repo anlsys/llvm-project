@@ -149,9 +149,9 @@ __xktgt_target_kernel(
     }
 
     // launch the kernel
-    device_global_id_t device_global_id = (device_global_id_t) (DeviceId + 1);
+    device_unique_id_t device_unique_id = (device_unique_id_t) (DeviceId + 1);
 
-    // device_t * device = xkomp->runtime.device_get(device_global_id);
+    // device_t * device = xkomp->runtime.device_get(device_unique_id);
     // assert(device);
 
     // driver_t * driver = xkomp->runtime.driver_get(device->driver_type);
@@ -160,23 +160,23 @@ __xktgt_target_kernel(
     // TODO: support shared memory
 
     constexpr command_queue_type_t qtype = XKRT_QUEUE_TYPE_KERN;
-    constexpr command_type_t       ctype = COMMAND_TYPE_KERN;
+    constexpr ocg::command_type_t  ctype = ocg::COMMAND_TYPE_PROG;
     constexpr command_flag_t       flags = COMMAND_FLAG_NONE;
     xkomp->runtime.task_emit_command(
-        device_global_id,
+        device_unique_id,
         qtype,
         ctype,
         flags,
         [&] (command_t * cmd) {
-            cmd->kern.fn        = GenericKernel.Func;
-            cmd->kern.grid.x    = NumBlocks[0];
-            cmd->kern.grid.y    = NumBlocks[1];
-            cmd->kern.grid.z    = NumBlocks[2];
-            cmd->kern.block.x   = NumThreads[0];
-            cmd->kern.block.y   = NumThreads[1];
-            cmd->kern.block.z   = NumThreads[2];
-            cmd->kern.args      = LaunchParams.Data;
-            cmd->kern.args_size = LaunchParams.Size;
+            cmd->prog.launcher.variadic.fn          = GenericKernel.Func;
+            cmd->prog.launcher.variadic.args        = LaunchParams.Data;
+            cmd->prog.launcher.variadic.args_size   = LaunchParams.Size;
+            cmd->prog.grid.x                        = NumBlocks[0];
+            cmd->prog.grid.y                        = NumBlocks[1];
+            cmd->prog.grid.z                        = NumBlocks[2];
+            cmd->prog.block.x                       = NumThreads[0];
+            cmd->prog.block.y                       = NumThreads[1];
+            cmd->prog.block.z                       = NumThreads[2];
         }
     );
 
@@ -244,11 +244,11 @@ __xktgt_target_data_update_nowait_mapper(
         if ((ArgType & OMP_TGT_MAPTYPE_TO) || (ArgType & OMP_TGT_MAPTYPE_FROM))
         {
             // retrieve xkrt device
-            const device_global_id_t device_global_id = (device_global_id_t) (DeviceId + 1);
+            const device_unique_id_t device_unique_id = (device_unique_id_t) (DeviceId + 1);
 
             // src/dst devices
-            const device_global_id_t src_device_global_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? HOST_DEVICE_GLOBAL_ID : device_global_id;
-            const device_global_id_t dst_device_global_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? device_global_id      : HOST_DEVICE_GLOBAL_ID;
+            const device_unique_id_t src_device_unique_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? XKRT_HOST_DEVICE_UNIQUE_ID : device_unique_id;
+            const device_unique_id_t dst_device_unique_id = (ArgType & OMP_TGT_MAPTYPE_TO) ? device_unique_id           : XKRT_HOST_DEVICE_UNIQUE_ID;
 
             // src/dst pointers
             const uintptr_t dst_ptr = (const uintptr_t) ((ArgType & OMP_TGT_MAPTYPE_TO) ? TgtPtrBegin : HstPtrBegin);
@@ -256,17 +256,17 @@ __xktgt_target_data_update_nowait_mapper(
 
             // queue/command type
             const command_queue_type_t qtype = (ArgType & OMP_TGT_MAPTYPE_TO) ? XKRT_QUEUE_TYPE_H2D      : XKRT_QUEUE_TYPE_D2H;
-            const command_type_t       ctype = (ArgType & OMP_TGT_MAPTYPE_TO) ? COMMAND_TYPE_COPY_H2D_1D : COMMAND_TYPE_COPY_D2H_1D;
+            const ocg::command_type_t  ctype = (ArgType & OMP_TGT_MAPTYPE_TO) ? ocg::COMMAND_TYPE_COPY_H2D_1D : ocg::COMMAND_TYPE_COPY_D2H_1D;
             constexpr command_flag_t   flags = COMMAND_FLAG_NONE;
 
             xkomp->runtime.task_emit_command(
-                device_global_id,
+                device_unique_id,
                 qtype,
                 ctype,
                 flags,
                 [&] (command_t * cmd) {
-                    cmd->copy_1D.src_device_global_id   = src_device_global_id;
-                    cmd->copy_1D.dst_device_global_id   = dst_device_global_id;
+                    cmd->copy_1D.src_device_unique_id   = src_device_unique_id;
+                    cmd->copy_1D.dst_device_unique_id   = dst_device_unique_id;
                     cmd->copy_1D.src_device_addr        = src_ptr;
                     cmd->copy_1D.dst_device_addr        = dst_ptr;
                     cmd->copy_1D.size                   = (size_t) ArgSize;
