@@ -70,6 +70,7 @@ int32_t __kmpc_omp_task_with_deps(ident_t *loc_ref, int32_t gtid,
     __attribute__((weak));
 }
 
+# if 0
 EXTERN int omp_get_num_devices(void) {
   TIMESCOPE();
   OMPT_IF_BUILT(ReturnAddressSetterRAII RA(__builtin_return_address(0)));
@@ -97,6 +98,7 @@ EXTERN int omp_get_initial_device(void) {
   DP("Call to omp_get_initial_device returning %d\n", HostDevice);
   return HostDevice;
 }
+# endif
 
 EXTERN void *omp_target_alloc(size_t Size, int DeviceNum) {
   TIMESCOPE_WITH_DETAILS("dst_dev=" + std::to_string(DeviceNum) +

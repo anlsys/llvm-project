@@ -237,12 +237,16 @@ EXTERN void __tgt_target_data_update_mapper(ident_t *Loc, int64_t DeviceId,
                                             int64_t *ArgTypes,
                                             map_var_info_t *ArgNames,
                                             void **ArgMappers) {
+  # if 0
   OMPT_IF_BUILT(ReturnAddressSetterRAII RA(__builtin_return_address(0)));
   targetData<AsyncInfoTy>(
       Loc, DeviceId, ArgNum, ArgsBase, Args, ArgSizes, ArgTypes, ArgNames,
       ArgMappers, targetDataUpdate,
       "Updating data within the OpenMP data region with update_mapper",
       "update");
+  # else
+  return __xktgt_target_data_update_mapper(Loc, DeviceId, ArgNum, ArgsBase, Args, ArgSizes, ArgTypes, ArgNames, ArgMappers);
+  # endif
 }
 
 EXTERN void __tgt_target_data_update_nowait_mapper(
