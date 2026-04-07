@@ -408,11 +408,14 @@ EXTERN int __tgt_target_kernel(ident_t *Loc, int64_t DeviceId, int32_t NumTeams,
     return targetKernel<TaskAsyncInfoWrapperTy>(
         Loc, DeviceId, NumTeams, ThreadLimit, HostPtr, KernelArgs);
     # else
-    return __xktgt_target_kernel(Loc, DeviceId, NumTeams, ThreadLimit, HostPtr, KernelArgs);
+    return __xktgt_target_kernel_nowait(Loc, DeviceId, NumTeams, ThreadLimit, HostPtr, KernelArgs);
     # endif
   }
+  # if 0
   return targetKernel<AsyncInfoTy>(Loc, DeviceId, NumTeams, ThreadLimit,
                                    HostPtr, KernelArgs);
+  # endif
+  return __xktgt_target_kernel(Loc, DeviceId, NumTeams, ThreadLimit, HostPtr, KernelArgs);
 }
 
 /// Activates the record replay mechanism.

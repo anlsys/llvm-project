@@ -25,6 +25,12 @@ extern "C" int omp_get_default_device(void);
 extern "C" int omp_get_default_device(void);
 extern "C" xkrt_device_unique_id_t omp_device_id_to_xkomp(int device_id);
 
+static void
+__xktgt_target_kernel_launch_free_dup_args(void * args[XKRT_CALLBACK_ARGS_MAX])
+{
+    free(args[0]);
+}
+
 /// Implements a kernel entry that executes the target region on the specified
 /// device.
 ///
@@ -37,8 +43,9 @@ extern "C" xkrt_device_unique_id_t omp_device_id_to_xkomp(int device_id);
 /// \param HostPtr  The pointer to the host function registered with the kernel.
 /// \param Args     All arguments to this kernel launch (see struct definition).
 
-int
-__xktgt_target_kernel(
+template <bool nowait>
+static int
+__xktgt_target_kernel_launch(
     void *Loc,
     int64_t DeviceId,
     int32_t NumTeams,
@@ -184,26 +191,84 @@ __xktgt_target_kernel(
 
     constexpr command_queue_type_t qtype = XKRT_QUEUE_TYPE_KERN;
     constexpr ocg::command_type_t  ctype = ocg::COMMAND_TYPE_PROG;
-    constexpr command_flag_t       flags = COMMAND_FLAG_NONE;
-    xkomp->runtime.task_emit_command(
-        device_unique_id,
-        qtype,
-        ctype,
-        flags,
-        [&] (command_t * command) {
-            command->prog.launcher.variadic.fn        = GenericKernel.Func;
-            command->prog.launcher.variadic.args      = LaunchParams.Data;
-            command->prog.launcher.variadic.args_size = LaunchParams.Size;
-            command->prog.grid.x                      = NumBlocks[0];
-            command->prog.grid.y                      = NumBlocks[1];
-            command->prog.grid.z                      = NumBlocks[2];
-            command->prog.block.x                     = NumThreads[0];
-            command->prog.block.y                     = NumThreads[1];
-            command->prog.block.z                     = NumThreads[2];
-        }
-    );
+
+    const auto builder = [&] (command_t * command) {
+        command->prog.launcher.variadic.fn        = GenericKernel.Func;
+        command->prog.launcher.variadic.args_size = LaunchParams.Size;
+        command->prog.grid.x                      = NumBlocks[0];
+        command->prog.grid.y                      = NumBlocks[1];
+        command->prog.grid.z                      = NumBlocks[2];
+        command->prog.block.x                     = NumThreads[0];
+        command->prog.block.y                     = NumThreads[1];
+        command->prog.block.z                     = NumThreads[2];
+    };
+
+    // if no wait, emit a command (e.g., with an event and increasing detach counter)
+    if (nowait)
+    {
+        // gotta dupplicate heap-allocated args, and free on command completion
+        constexpr command_flag_t flags = COMMAND_FLAG_NONE;
+
+        const auto builder_nowait = [&] (command_t * command)
+        {
+            // construct command
+            builder(command);
+
+            // TODO: can be do faster than a malloc here?
+            // idea: have a `small_vector_t` within the `command_t`
+
+            // dupplicate args
+            void * dup_args = malloc(LaunchParams.Size);
+            assert(dup_args);
+            memcpy(dup_args, LaunchParams.Data, LaunchParams.Size);
+
+            command->prog.launcher.variadic.args = dup_args;
+
+            // set callback to release args
+            callback_t cb;
+            cb.func = __xktgt_target_kernel_launch_free_dup_args;
+            cb.args[0] = dup_args;
+            command->completion_callback_push(cb);
+        };
+
+        xkomp->runtime.task_emit_command(device_unique_id, qtype, ctype, flags, builder_nowait);
+    }
+    // else, submit serialized command
+    else
+    {
+        // can use heap-allocated args
+        constexpr command_flag_t flags = COMMAND_FLAG_SERIALIZED | COMMAND_FLAG_SYNCHRONOUS;
+        command_t command(ctype, flags);
+        builder(&command);
+        command.prog.launcher.variadic.args = LaunchParams.Data;
+        xkomp->runtime.command_submit(device_unique_id, &command);
+    }
 
     return 0;
+}
+
+int
+__xktgt_target_kernel_nowait(
+    void *Loc,
+    int64_t DeviceId,
+    int32_t NumTeams,
+    int32_t ThreadLimit,
+    void *HostPtr,
+    KernelArgsTy *KernelArgs
+) {
+    return __xktgt_target_kernel_launch<true>(Loc, DeviceId, NumTeams, ThreadLimit, HostPtr, KernelArgs);
+}
+
+int
+__xktgt_target_kernel(
+    void *Loc,
+    int64_t DeviceId,
+    int32_t NumTeams,
+    int32_t ThreadLimit,
+    void *HostPtr,
+    KernelArgsTy *KernelArgs
+) {
+    return __xktgt_target_kernel_launch<false>(Loc, DeviceId, NumTeams, ThreadLimit, HostPtr, KernelArgs);
 }
 
 //////////////////////////////

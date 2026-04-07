@@ -12,6 +12,15 @@ int __xktgt_target_kernel(
     KernelArgsTy *KernelArgs
 );
 
+int __xktgt_target_kernel_nowait(
+    void *Loc,
+    int64_t DeviceId,
+    int32_t NumTeams,
+    int32_t ThreadLimit,
+    void *HostPtr,
+    KernelArgsTy *KernelArgs
+);
+
 void __xktgt_target_data_update_nowait_mapper(
     void *Loc, int64_t DeviceId, int32_t ArgNum, void **ArgsBase,
     void **Args, int64_t *ArgSizes, int64_t *ArgTypes, void **ArgNames,
