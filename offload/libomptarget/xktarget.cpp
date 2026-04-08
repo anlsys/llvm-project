@@ -224,11 +224,14 @@ __xktgt_target_kernel_launch(
 
             command->prog.launcher.variadic.args = dup_args;
 
+            // TODO: reenable this free, but gotta find a way to handle replay in TDG
+            # if 0
             // set callback to release args
             callback_t cb;
             cb.func = __xktgt_target_kernel_launch_free_dup_args;
             cb.args[0] = dup_args;
             command->completion_callback_push(cb);
+            # endif
         };
 
         xkomp->runtime.task_emit_command(device_unique_id, qtype, ctype, flags, builder_nowait);
