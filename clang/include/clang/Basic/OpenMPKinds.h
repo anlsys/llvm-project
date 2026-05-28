@@ -51,13 +51,34 @@ enum OpenMPDeviceClauseModifier {
   OMPC_DEVICE_unknown,
 };
 
-/// OpenMP modifiers for 'access' clause.
+/// OpenMP modifiers for 'access' clause (used for keyword parsing).
 enum OpenMPAccessClauseModifier {
 #define OPENMP_ACCESS_MODIFIER(Name) \
   OMPC_ACCESS_##Name,
 #include "clang/Basic/OpenMPKinds.def"
   OMPC_ACCESS_unknown
 };
+
+/// Bitmask flags for access clause modifiers.
+/// Multiple modifiers can be combined (e.g., read | write).
+enum OpenMPAccessModifierFlag : unsigned {
+  OMPC_ACCESS_FLAG_read    = 0x1,
+  OMPC_ACCESS_FLAG_write   = 0x2,
+  OMPC_ACCESS_FLAG_storage = 0x4,
+  OMPC_ACCESS_FLAG_virtual = 0x8,
+};
+
+/// Convert a single parsed access modifier enum to its bitmask flag.
+inline unsigned getAccessModifierFlag(OpenMPAccessClauseModifier M) {
+  switch (M) {
+  case OMPC_ACCESS_read:      return OMPC_ACCESS_FLAG_read;
+  case OMPC_ACCESS_write:     return OMPC_ACCESS_FLAG_write;
+  case OMPC_ACCESS_storage:   return OMPC_ACCESS_FLAG_storage;
+  case OMPC_ACCESS_virtual:   return OMPC_ACCESS_FLAG_virtual;
+  case OMPC_ACCESS_unknown:   return 0;
+  }
+  return 0;
+}
 
 /// OpenMP attributes for 'depend' clause.
 enum OpenMPDependClauseKind {

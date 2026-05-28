@@ -13225,7 +13225,7 @@ StmtResult SemaOpenMP::ActOnOpenMPTargetUpdateDirective(
   if (!HasMotionClause) {
     bool HasNonVirtualReadAccess = llvm::any_of(Clauses, [](const OMPClause *C) {
       if (const auto *AC = dyn_cast<OMPAccessClause>(C))
-        return AC->getAccessModifier() == OMPC_ACCESS_read && !AC->isVirtual();
+        return AC->hasRead() && !AC->isVirtual();
       return false;
     });
     if (!HasNonVirtualReadAccess) {
@@ -17554,12 +17554,8 @@ OMPClause *SemaOpenMP::ActOnOpenMPVarListClause(OpenMPClauseKind Kind,
     Res = ActOnOpenMPFlushClause(VarList, StartLoc, LParenLoc, EndLoc);
     break;
   case OMPC_access:
-    assert(0 <= ExtraModifier && ExtraModifier <= OMPC_ACCESS_unknown &&
-           "Unexpected access modifier.");
     Res = ActOnOpenMPAccessClause(
-        {static_cast<OpenMPAccessClauseModifier>(ExtraModifier),
-         Data.IsVirtualAccess, ExtraModifierLoc, Data.VirtualAccessLoc,
-         ColonLoc},
+        {static_cast<unsigned>(ExtraModifier), ExtraModifierLoc, ColonLoc},
         VarList, StartLoc, LParenLoc, EndLoc);
     break;
   case OMPC_depend:
@@ -20485,20 +20481,23 @@ OMPClause *SemaOpenMP::ActOnOpenMPAccessClause(
     const OMPAccessClause::AccessDataTy &Data, ArrayRef<Expr *> VarList,
     SourceLocation StartLoc, SourceLocation LParenLoc,
     SourceLocation EndLoc) {
-  OpenMPAccessClauseModifier Modifier = Data.Modifier;
+  unsigned Mods = Data.Modifiers;
   SourceLocation ModifierLoc = Data.ModifierLoc;
 
-  if (Modifier == OMPC_ACCESS_unknown) {
+  // Must have at least one of read, write, or storage.
+  if (!(Mods & (OMPC_ACCESS_FLAG_read | OMPC_ACCESS_FLAG_write |
+                OMPC_ACCESS_FLAG_storage))) {
     Diag(ModifierLoc, diag::err_omp_unexpected_clause_value)
         << "'read', 'write' or 'storage'"
         << getOpenMPClauseNameForDiag(OMPC_access);
     return nullptr;
   }
 
-  // 'virtual' can only be combined with 'read' or 'write', not 'storage'.
-  if (Data.IsVirtual && Modifier == OMPC_ACCESS_storage) {
-    Diag(Data.VirtualLoc, diag::err_omp_unexpected_clause_value)
-        << "'virtual' modifier cannot be used with 'storage'"
+  // 'virtual' can only appear if 'read' or 'write' is also present.
+  if ((Mods & OMPC_ACCESS_FLAG_virtual) &&
+      !(Mods & (OMPC_ACCESS_FLAG_read | OMPC_ACCESS_FLAG_write))) {
+    Diag(ModifierLoc, diag::err_omp_unexpected_clause_value)
+        << "'virtual' modifier requires 'read' or 'write'"
         << getOpenMPClauseNameForDiag(OMPC_access);
     return nullptr;
   }

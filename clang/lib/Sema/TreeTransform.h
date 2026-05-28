@@ -11270,8 +11270,7 @@ TreeTransform<Derived>::TransformOMPAccessClause(OMPAccessClause *C) {
     Vars.push_back(EVar.get());
   }
   return getDerived().RebuildOMPAccessClause(
-      {C->getAccessModifier(), C->isVirtual(), C->getModifierLoc(),
-       C->getVirtualLoc(), C->getColonLoc()},
+      {C->getModifiers(), C->getModifierLoc(), C->getColonLoc()},
       Vars, C->getBeginLoc(), C->getLParenLoc(), C->getEndLoc());
 }
 

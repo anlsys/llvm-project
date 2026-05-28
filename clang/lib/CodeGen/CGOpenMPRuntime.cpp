@@ -4363,31 +4363,6 @@ std::pair<llvm::Value *, Address> CGOpenMPRuntime::emitDependClause(
   return std::make_pair(NumOfElements, DependenciesArray);
 }
 
-/// Translates access clause modifier to a runtime flag value.
-/// These flags are custom extensions, using values that don't overlap with
-/// the standard RTLDependenceKindTy flags.
-/// The 'virtual' modifier adds 0x80 to the flag.
-static unsigned translateAccessModifier(OpenMPAccessClauseModifier M,
-                                        bool IsVirtual) {
-  unsigned Flag;
-  switch (M) {
-  case OMPC_ACCESS_read:
-    Flag = 0x10;
-    break;
-  case OMPC_ACCESS_write:
-    Flag = 0x20;
-    break;
-  case OMPC_ACCESS_storage:
-    Flag = 0x40;
-    break;
-  case OMPC_ACCESS_unknown:
-    llvm_unreachable("Unknown access modifier");
-  }
-  if (IsVirtual)
-    Flag |= 0x80;
-  return Flag;
-}
-
 std::pair<llvm::Value *, Address> CGOpenMPRuntime::emitAccessClause(
     CodeGenFunction &CGF, ArrayRef<OMPTaskDataTy::AccessData> Accesses,
     SourceLocation Loc) {
@@ -4422,7 +4397,10 @@ std::pair<llvm::Value *, Address> CGOpenMPRuntime::emitAccessClause(
 
   unsigned Pos = 0;
   for (const OMPTaskDataTy::AccessData &Acc : Accesses) {
-    unsigned Flag = translateAccessModifier(Acc.Modifier, Acc.IsVirtual);
+    // The bitmask (OMPC_ACCESS_FLAG_read=0x1, write=0x2, storage=0x4,
+    // virtual=0x8) maps directly to the kmp_access_info_t.flags bitfield
+    // layout, so we forward it as-is to the runtime.
+    unsigned Flag = Acc.Modifiers;
     for (const Expr *E : Acc.AccExprs) {
       llvm::Value *Addr;
       llvm::Value *Size;

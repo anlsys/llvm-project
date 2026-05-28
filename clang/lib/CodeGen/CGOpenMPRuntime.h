@@ -113,12 +113,10 @@ struct OMPTaskDataTy final {
   };
   SmallVector<DependData, 4> Dependences;
   struct AccessData {
-    OpenMPAccessClauseModifier Modifier = OMPC_ACCESS_unknown;
-    bool IsVirtual = false;
+    unsigned Modifiers = 0;
     SmallVector<const Expr *, 4> AccExprs;
     explicit AccessData() = default;
-    AccessData(OpenMPAccessClauseModifier Modifier, bool IsVirtual = false)
-        : Modifier(Modifier), IsVirtual(IsVirtual) {}
+    explicit AccessData(unsigned Modifiers) : Modifiers(Modifiers) {}
   };
   SmallVector<AccessData, 4> Accesses;
   llvm::PointerIntPair<llvm::Value *, 1, bool> Final;

@@ -1156,9 +1156,7 @@ public:
         MotionModifiers;
     SmallVector<SourceLocation, NumberOfOMPMotionModifiers> MotionModifiersLoc;
     bool IsMapTypeImplicit = false;
-    bool IsVirtualAccess = false;
     SourceLocation ExtraModifierLoc;
-    SourceLocation VirtualAccessLoc;
     SourceLocation OriginalSharingModifierLoc;
     SourceLocation OmpAllMemoryLoc;
     SourceLocation

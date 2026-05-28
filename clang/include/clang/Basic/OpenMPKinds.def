@@ -103,6 +103,7 @@
 OPENMP_ACCESS_MODIFIER(read)
 OPENMP_ACCESS_MODIFIER(write)
 OPENMP_ACCESS_MODIFIER(storage)
+OPENMP_ACCESS_MODIFIER(virtual)
 
 // Static attributes for 'schedule' clause.
 OPENMP_SCHEDULE_KIND(static)

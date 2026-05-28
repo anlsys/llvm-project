@@ -5480,17 +5480,12 @@ class OMPAccessClause final
 
 public:
   struct AccessDataTy final {
-    /// Access modifier (one of read, write, storage).
-    OpenMPAccessClauseModifier Modifier = OMPC_ACCESS_unknown;
+    /// Bitmask of OpenMPAccessModifierFlag values (read, write, storage,
+    /// virtual). Multiple modifiers can be combined.
+    unsigned Modifiers = 0;
 
-    /// Whether the 'virtual' modifier is present.
-    bool IsVirtual = false;
-
-    /// Modifier location.
+    /// Location of the first modifier keyword.
     SourceLocation ModifierLoc;
-
-    /// Location of the 'virtual' keyword (if present).
-    SourceLocation VirtualLoc;
 
     /// Colon location.
     SourceLocation ColonLoc;
@@ -5519,17 +5514,11 @@ private:
                                           SourceLocation(), SourceLocation(),
                                           SourceLocation(), N) {}
 
-  /// Set access modifier.
-  void setModifier(OpenMPAccessClauseModifier M) { Data.Modifier = M; }
-
-  /// Set whether the 'virtual' modifier is present.
-  void setIsVirtual(bool V) { Data.IsVirtual = V; }
+  /// Set access modifiers bitmask.
+  void setModifiers(unsigned M) { Data.Modifiers = M; }
 
   /// Set modifier location.
   void setModifierLoc(SourceLocation Loc) { Data.ModifierLoc = Loc; }
-
-  /// Set location of the 'virtual' keyword.
-  void setVirtualLoc(SourceLocation Loc) { Data.VirtualLoc = Loc; }
 
   /// Set colon location.
   void setColonLoc(SourceLocation Loc) { Data.ColonLoc = Loc; }
@@ -5554,17 +5543,31 @@ public:
   /// \param N The number of variables.
   static OMPAccessClause *CreateEmpty(const ASTContext &C, unsigned N);
 
-  /// Get access modifier.
-  OpenMPAccessClauseModifier getAccessModifier() const { return Data.Modifier; }
+  /// Get access modifiers bitmask.
+  unsigned getModifiers() const { return Data.Modifiers; }
 
   /// Whether the 'virtual' modifier is present.
-  bool isVirtual() const { return Data.IsVirtual; }
+  bool isVirtual() const {
+    return Data.Modifiers & OMPC_ACCESS_FLAG_virtual;
+  }
+
+  /// Whether the 'read' modifier is present.
+  bool hasRead() const {
+    return Data.Modifiers & OMPC_ACCESS_FLAG_read;
+  }
+
+  /// Whether the 'write' modifier is present.
+  bool hasWrite() const {
+    return Data.Modifiers & OMPC_ACCESS_FLAG_write;
+  }
+
+  /// Whether the 'storage' modifier is present.
+  bool hasStorage() const {
+    return Data.Modifiers & OMPC_ACCESS_FLAG_storage;
+  }
 
   /// Get access modifier location.
   SourceLocation getModifierLoc() const { return Data.ModifierLoc; }
-
-  /// Get location of the 'virtual' keyword.
-  SourceLocation getVirtualLoc() const { return Data.VirtualLoc; }
 
   /// Get colon location.
   SourceLocation getColonLoc() const { return Data.ColonLoc; }

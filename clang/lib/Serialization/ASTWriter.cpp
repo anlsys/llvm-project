@@ -8213,10 +8213,8 @@ void OMPClauseWriter::VisitOMPDepobjClause(OMPDepobjClause *C) {
 void OMPClauseWriter::VisitOMPAccessClause(OMPAccessClause *C) {
   Record.push_back(C->varlist_size());
   Record.AddSourceLocation(C->getLParenLoc());
-  Record.push_back(C->getAccessModifier());
-  Record.push_back(C->isVirtual());
+  Record.push_back(C->getModifiers());
   Record.AddSourceLocation(C->getModifierLoc());
-  Record.AddSourceLocation(C->getVirtualLoc());
   Record.AddSourceLocation(C->getColonLoc());
   for (auto *VE : C->varlist())
     Record.AddStmt(VE);

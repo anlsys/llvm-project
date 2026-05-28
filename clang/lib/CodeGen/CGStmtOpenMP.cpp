@@ -4820,7 +4820,7 @@ static void buildAccesses(const OMPExecutableDirective &S,
                           OMPTaskDataTy &Data) {
   for (const auto *C : S.getClausesOfKind<OMPAccessClause>()) {
     OMPTaskDataTy::AccessData &AD =
-        Data.Accesses.emplace_back(C->getAccessModifier(), C->isVirtual());
+        Data.Accesses.emplace_back(C->getModifiers());
     AD.AccExprs.append(C->varlist_begin(), C->varlist_end());
   }
 }

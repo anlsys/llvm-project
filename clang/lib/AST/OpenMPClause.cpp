@@ -1082,10 +1082,8 @@ OMPAccessClause::Create(const ASTContext &C, SourceLocation StartLoc,
                          alignof(OMPAccessClause));
   OMPAccessClause *Clause =
       new (Mem) OMPAccessClause(StartLoc, LParenLoc, EndLoc, VL.size());
-  Clause->setModifier(Data.Modifier);
-  Clause->setIsVirtual(Data.IsVirtual);
+  Clause->setModifiers(Data.Modifiers);
   Clause->setModifierLoc(Data.ModifierLoc);
-  Clause->setVirtualLoc(Data.VirtualLoc);
   Clause->setColonLoc(Data.ColonLoc);
   Clause->setVarRefs(VL);
   return Clause;
@@ -2502,10 +2500,20 @@ void OMPClausePrinter::VisitOMPDepobjClause(OMPDepobjClause *Node) {
 
 void OMPClausePrinter::VisitOMPAccessClause(OMPAccessClause *Node) {
   OS << "access(";
-  if (Node->isVirtual())
-    OS << "virtual, ";
-  OS << getOpenMPSimpleClauseTypeName(Node->getClauseKind(),
-                                      Node->getAccessModifier());
+  unsigned Mods = Node->getModifiers();
+  bool First = true;
+  auto PrintMod = [&](unsigned Flag, const char *Name) {
+    if (Mods & Flag) {
+      if (!First)
+        OS << ", ";
+      OS << Name;
+      First = false;
+    }
+  };
+  PrintMod(OMPC_ACCESS_FLAG_virtual, "virtual");
+  PrintMod(OMPC_ACCESS_FLAG_read, "read");
+  PrintMod(OMPC_ACCESS_FLAG_write, "write");
+  PrintMod(OMPC_ACCESS_FLAG_storage, "storage");
   if (!Node->varlist_empty())
     OS << " :";
   VisitOMPClauseList(Node, ' ');

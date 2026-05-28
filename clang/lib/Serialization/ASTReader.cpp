@@ -12032,10 +12032,8 @@ void OMPClauseReader::VisitOMPDepobjClause(OMPDepobjClause *C) {
 
 void OMPClauseReader::VisitOMPAccessClause(OMPAccessClause *C) {
   C->setLParenLoc(Record.readSourceLocation());
-  C->setModifier(static_cast<OpenMPAccessClauseModifier>(Record.readInt()));
-  C->setIsVirtual(Record.readBool());
+  C->setModifiers(Record.readInt());
   C->setModifierLoc(Record.readSourceLocation());
-  C->setVirtualLoc(Record.readSourceLocation());
   C->setColonLoc(Record.readSourceLocation());
   unsigned NumVars = C->varlist_size();
   SmallVector<Expr *, 16> Vars;

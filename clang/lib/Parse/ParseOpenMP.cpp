@@ -4476,30 +4476,35 @@ bool Parser::ParseOpenMPVarList(OpenMPDirectiveKind DKind,
       Data.ReductionOrMapperId =
           Actions.GetNameFromUnqualifiedId(UnqualifiedReductionId);
   } else if (Kind == OMPC_access) {
-    // Handle access modifiers: [virtual,] read|write|storage
+    // Handle comma-separated access modifiers: modifier [, modifier]* : exprs
+    // where modifier is one of: read, write, storage, virtual
     ColonProtectionRAIIObject ColonRAII(*this);
-    // Check for optional 'virtual' modifier.
-    if (Tok.is(tok::identifier) && PP.getSpelling(Tok) == "virtual") {
-      Data.IsVirtualAccess = true;
-      Data.VirtualAccessLoc = Tok.getLocation();
+    unsigned ModifierFlags = 0;
+    Data.ExtraModifierLoc = Tok.getLocation();
+    bool ParsedAny = false;
+    while (Tok.is(tok::identifier)) {
+      auto Mod = static_cast<OpenMPAccessClauseModifier>(
+          getOpenMPSimpleClauseType(
+              Kind, PP.getSpelling(Tok), getLangOpts()));
+      if (Mod == OMPC_ACCESS_unknown)
+        break;
+      ModifierFlags |= getAccessModifierFlag(Mod);
+      ParsedAny = true;
       ConsumeToken();
-      // Expect comma after 'virtual'.
       if (Tok.is(tok::comma)) {
         ConsumeToken();
       } else {
-        Diag(Tok, diag::warn_pragma_expected_colon) << "','";
+        // No comma means we expect the colon next.
+        break;
       }
     }
-    // Parse the primary modifier (read, write, storage).
-    Data.ExtraModifier = getOpenMPSimpleClauseType(
-        Kind, Tok.is(tok::identifier) ? PP.getSpelling(Tok) : "",
-        getLangOpts());
-    Data.ExtraModifierLoc = Tok.getLocation();
-    if (Data.ExtraModifier == OMPC_ACCESS_unknown) {
+    Data.ExtraModifier = static_cast<int>(ModifierFlags);
+    if (!ParsedAny) {
+      Diag(Tok, diag::err_omp_unexpected_clause_value)
+          << "'read', 'write', 'storage' or 'virtual'"
+          << getOpenMPClauseName(OMPC_access);
       SkipUntil(tok::colon, tok::r_paren, tok::annot_pragma_openmp_end,
                 StopBeforeMatch);
-    } else {
-      ConsumeToken();
     }
     if (Tok.is(tok::colon)) {
       Data.ColonLoc = ConsumeToken();
