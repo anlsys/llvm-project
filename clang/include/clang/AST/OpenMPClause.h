@@ -5463,6 +5463,134 @@ public:
   }
 };
 
+/// This represents the 'access' clause for the '#pragma omp task',
+/// '#pragma omp taskwait', and '#pragma omp target' directives.
+///
+/// \code
+/// #pragma omp task access(write: x[0:n])
+/// \endcode
+/// In this example directive '#pragma omp task' with clause 'access' with
+/// modifier 'write' and array section 'x[0:n]'.
+class OMPAccessClause final
+    : public OMPVarListClause<OMPAccessClause>,
+      private llvm::TrailingObjects<OMPAccessClause, Expr *> {
+  friend class OMPClauseReader;
+  friend OMPVarListClause;
+  friend TrailingObjects;
+
+public:
+  struct AccessDataTy final {
+    /// Access modifier (one of read, write, storage).
+    OpenMPAccessClauseModifier Modifier = OMPC_ACCESS_unknown;
+
+    /// Whether the 'virtual' modifier is present.
+    bool IsVirtual = false;
+
+    /// Modifier location.
+    SourceLocation ModifierLoc;
+
+    /// Location of the 'virtual' keyword (if present).
+    SourceLocation VirtualLoc;
+
+    /// Colon location.
+    SourceLocation ColonLoc;
+  };
+
+private:
+  /// Access modifier and source locations.
+  AccessDataTy Data;
+
+  /// Build clause with number of variables \a N.
+  ///
+  /// \param StartLoc Starting location of the clause.
+  /// \param LParenLoc Location of '('.
+  /// \param EndLoc Ending location of the clause.
+  /// \param N Number of the variables in the clause.
+  OMPAccessClause(SourceLocation StartLoc, SourceLocation LParenLoc,
+                  SourceLocation EndLoc, unsigned N)
+      : OMPVarListClause<OMPAccessClause>(llvm::omp::OMPC_access, StartLoc,
+                                          LParenLoc, EndLoc, N) {}
+
+  /// Build an empty clause.
+  ///
+  /// \param N Number of variables.
+  explicit OMPAccessClause(unsigned N)
+      : OMPVarListClause<OMPAccessClause>(llvm::omp::OMPC_access,
+                                          SourceLocation(), SourceLocation(),
+                                          SourceLocation(), N) {}
+
+  /// Set access modifier.
+  void setModifier(OpenMPAccessClauseModifier M) { Data.Modifier = M; }
+
+  /// Set whether the 'virtual' modifier is present.
+  void setIsVirtual(bool V) { Data.IsVirtual = V; }
+
+  /// Set modifier location.
+  void setModifierLoc(SourceLocation Loc) { Data.ModifierLoc = Loc; }
+
+  /// Set location of the 'virtual' keyword.
+  void setVirtualLoc(SourceLocation Loc) { Data.VirtualLoc = Loc; }
+
+  /// Set colon location.
+  void setColonLoc(SourceLocation Loc) { Data.ColonLoc = Loc; }
+
+public:
+  /// Creates clause with a list of variables \a VL.
+  ///
+  /// \param C AST context.
+  /// \param StartLoc Starting location of the clause.
+  /// \param LParenLoc Location of '('.
+  /// \param EndLoc Ending location of the clause.
+  /// \param Data Access modifier and source locations.
+  /// \param VL List of references to the variables (array sections).
+  static OMPAccessClause *Create(const ASTContext &C, SourceLocation StartLoc,
+                                 SourceLocation LParenLoc,
+                                 SourceLocation EndLoc, AccessDataTy Data,
+                                 ArrayRef<Expr *> VL);
+
+  /// Creates an empty clause with \a N variables.
+  ///
+  /// \param C AST context.
+  /// \param N The number of variables.
+  static OMPAccessClause *CreateEmpty(const ASTContext &C, unsigned N);
+
+  /// Get access modifier.
+  OpenMPAccessClauseModifier getAccessModifier() const { return Data.Modifier; }
+
+  /// Whether the 'virtual' modifier is present.
+  bool isVirtual() const { return Data.IsVirtual; }
+
+  /// Get access modifier location.
+  SourceLocation getModifierLoc() const { return Data.ModifierLoc; }
+
+  /// Get location of the 'virtual' keyword.
+  SourceLocation getVirtualLoc() const { return Data.VirtualLoc; }
+
+  /// Get colon location.
+  SourceLocation getColonLoc() const { return Data.ColonLoc; }
+
+  child_range children() {
+    return child_range(reinterpret_cast<Stmt **>(varlist_begin()),
+                       reinterpret_cast<Stmt **>(varlist_end()));
+  }
+
+  const_child_range children() const {
+    auto Children = const_cast<OMPAccessClause *>(this)->children();
+    return const_child_range(Children.begin(), Children.end());
+  }
+
+  child_range used_children() {
+    return child_range(child_iterator(), child_iterator());
+  }
+  const_child_range used_children() const {
+    return const_child_range(const_child_iterator(), const_child_iterator());
+  }
+
+  static bool classof(const OMPClause *T) {
+    return T->getClauseKind() == llvm::omp::OMPC_access;
+  }
+};
+
 /// This represents implicit clause 'depend' for the '#pragma omp task'
 /// directive.
 ///

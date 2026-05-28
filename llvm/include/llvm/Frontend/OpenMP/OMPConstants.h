@@ -239,6 +239,10 @@ enum class OpenMPOffloadMappingFlags : uint64_t {
   // dynamic.
   // This is an OpenMP extension for the sake of OpenACC support.
   OMP_MAP_OMPX_HOLD = 0x2000,
+  /// Signal that this entry corresponds to an 'access' clause expression.
+  /// At runtime, such entries are resolved via xkomp_access_pointer(idx)
+  /// rather than through the standard host-to-device mapping lookup.
+  OMP_MAP_ACCESS = 0x4000,
   /// Signal that the runtime library should use args as an array of
   /// descriptor_dim pointers and use args_size as dims. Used when we have
   /// non-contiguous list items in target update directive
@@ -271,6 +275,9 @@ enum class OMPAtomicCompareOp : unsigned { EQ, MIN, MAX };
 
 /// Fields ids in kmp_depend_info record.
 enum class RTLDependInfoFields { BaseAddr, Len, Flags };
+
+/// Fields ids in kmp_access_info record.
+enum class RTLAccessInfoFields { BaseAddr, Len, Flags };
 
 /// Dependence kind for RTL.
 enum class RTLDependenceKindTy {

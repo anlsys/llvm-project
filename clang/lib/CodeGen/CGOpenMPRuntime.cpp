@@ -3733,6 +3733,14 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
   if (Ndeps == NULL)
       Ndeps = llvm::ConstantInt::get(CGF.Int32Ty, 0);
 
+  // Get the number of accesses in the access clauses
+  unsigned NumAccesses = std::accumulate(
+      Data.Accesses.begin(), Data.Accesses.end(), 0u,
+      [](unsigned V, const OMPTaskDataTy::AccessData &A) {
+        return V + A.AccExprs.size();
+      });
+  llvm::Value *Nacs = llvm::ConstantInt::get(CGF.Int32Ty, NumAccesses);
+
   // Arguments of the func call
   SmallVector<llvm::Value *, 10> AllocArgs = {
       emitUpdateLocation(CGF, Loc),
@@ -3760,6 +3768,7 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
       DeviceID = CGF.Builder.getInt64(OMP_DEVICEID_UNDEF);
     AllocArgs.push_back(DeviceID);
     AllocArgs.push_back(Ndeps);
+    AllocArgs.push_back(Nacs);
     NewTask = CGF.EmitRuntimeCall(
         OMPBuilder.getOrCreateRuntimeFunction(
             CGM.getModule(), OMPRTL___kmpc_omp_target_task_alloc_with_deps),
@@ -3767,6 +3776,7 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
         AllocArgs);
   } else {
     AllocArgs.push_back(Ndeps);
+    AllocArgs.push_back(Nacs);
     NewTask =
         CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
                                 CGM.getModule(), OMPRTL___kmpc_omp_task_alloc_with_deps),
@@ -4040,6 +4050,20 @@ static void getDependTypes(ASTContext &C, QualType &KmpDependInfoTy,
     addFieldToRecordDecl(C, KmpDependInfoRD, FlagsTy);
     KmpDependInfoRD->completeDefinition();
     KmpDependInfoTy = C.getRecordType(KmpDependInfoRD);
+  }
+}
+
+static void getAccessTypes(ASTContext &C, QualType &KmpAccessInfoTy,
+                            QualType &FlagsTy) {
+  FlagsTy = C.getIntTypeForBitwidth(C.getTypeSize(C.BoolTy), /*Signed=*/false);
+  if (KmpAccessInfoTy.isNull()) {
+    RecordDecl *KmpAccessInfoRD = C.buildImplicitRecord("kmp_access_info");
+    KmpAccessInfoRD->startDefinition();
+    addFieldToRecordDecl(C, KmpAccessInfoRD, C.getIntPtrType());
+    addFieldToRecordDecl(C, KmpAccessInfoRD, C.getSizeType());
+    addFieldToRecordDecl(C, KmpAccessInfoRD, FlagsTy);
+    KmpAccessInfoRD->completeDefinition();
+    KmpAccessInfoTy = C.getRecordType(KmpAccessInfoRD);
   }
 }
 
@@ -4339,6 +4363,104 @@ std::pair<llvm::Value *, Address> CGOpenMPRuntime::emitDependClause(
   return std::make_pair(NumOfElements, DependenciesArray);
 }
 
+/// Translates access clause modifier to a runtime flag value.
+/// These flags are custom extensions, using values that don't overlap with
+/// the standard RTLDependenceKindTy flags.
+/// The 'virtual' modifier adds 0x80 to the flag.
+static unsigned translateAccessModifier(OpenMPAccessClauseModifier M,
+                                        bool IsVirtual) {
+  unsigned Flag;
+  switch (M) {
+  case OMPC_ACCESS_read:
+    Flag = 0x10;
+    break;
+  case OMPC_ACCESS_write:
+    Flag = 0x20;
+    break;
+  case OMPC_ACCESS_storage:
+    Flag = 0x40;
+    break;
+  case OMPC_ACCESS_unknown:
+    llvm_unreachable("Unknown access modifier");
+  }
+  if (IsVirtual)
+    Flag |= 0x80;
+  return Flag;
+}
+
+std::pair<llvm::Value *, Address> CGOpenMPRuntime::emitAccessClause(
+    CodeGenFunction &CGF, ArrayRef<OMPTaskDataTy::AccessData> Accesses,
+    SourceLocation Loc) {
+  if (llvm::all_of(Accesses, [](const OMPTaskDataTy::AccessData &A) {
+        return A.AccExprs.empty();
+      }))
+    return std::make_pair(nullptr, Address::invalid());
+
+  // Process list of access entries.
+  ASTContext &C = CGM.getContext();
+  Address AccessArray = Address::invalid();
+  unsigned NumAccesses = std::accumulate(
+      Accesses.begin(), Accesses.end(), 0u,
+      [](unsigned V, const OMPTaskDataTy::AccessData &A) {
+        return V + A.AccExprs.size();
+      });
+
+  QualType FlagsTy;
+  getAccessTypes(C, KmpAccessInfoTy, FlagsTy);
+  RecordDecl *KmpAccessInfoRD =
+      cast<RecordDecl>(KmpAccessInfoTy->getAsTagDecl());
+  llvm::Type *LLVMFlagsTy = CGF.ConvertTypeForMem(FlagsTy);
+
+  // Allocate array of kmp_access_info for the access entries.
+  QualType KmpAccessInfoArrayTy = C.getConstantArrayType(
+      KmpAccessInfoTy, llvm::APInt(/*numBits=*/64, NumAccesses), nullptr,
+      ArraySizeModifier::Normal, /*IndexTypeQuals=*/0);
+  AccessArray = CGF.CreateMemTemp(KmpAccessInfoArrayTy, ".acc.arr.addr");
+  AccessArray = CGF.Builder.CreateConstArrayGEP(AccessArray, 0);
+  llvm::Value *NumOfElements = llvm::ConstantInt::get(CGM.Int32Ty, NumAccesses,
+                                                      /*isSigned=*/false);
+
+  unsigned Pos = 0;
+  for (const OMPTaskDataTy::AccessData &Acc : Accesses) {
+    unsigned Flag = translateAccessModifier(Acc.Modifier, Acc.IsVirtual);
+    for (const Expr *E : Acc.AccExprs) {
+      llvm::Value *Addr;
+      llvm::Value *Size;
+      std::tie(Addr, Size) = getPointerAndSize(CGF, E);
+      Addr = CGF.Builder.CreatePtrToInt(Addr, CGF.IntPtrTy);
+
+      LValue Base = CGF.MakeAddrLValue(
+          CGF.Builder.CreateConstGEP(AccessArray, Pos), KmpAccessInfoTy);
+
+      // acc[i].base_addr = &<expression>;
+      LValue BaseAddrLVal = CGF.EmitLValueForField(
+          Base,
+          *std::next(KmpAccessInfoRD->field_begin(),
+                     static_cast<unsigned int>(RTLAccessInfoFields::BaseAddr)));
+      CGF.EmitStoreOfScalar(Addr, BaseAddrLVal);
+
+      // acc[i].len = sizeof(<expression>);
+      LValue LenLVal = CGF.EmitLValueForField(
+          Base,
+          *std::next(KmpAccessInfoRD->field_begin(),
+                     static_cast<unsigned int>(RTLAccessInfoFields::Len)));
+      CGF.EmitStoreOfScalar(Size, LenLVal);
+
+      // acc[i].flags = access modifier flag;
+      LValue FlagsLVal = CGF.EmitLValueForField(
+          Base,
+          *std::next(KmpAccessInfoRD->field_begin(),
+                     static_cast<unsigned int>(RTLAccessInfoFields::Flags)));
+      CGF.EmitStoreOfScalar(llvm::ConstantInt::get(LLVMFlagsTy, Flag),
+                            FlagsLVal);
+      ++Pos;
+    }
+  }
+  AccessArray = CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
+      AccessArray, CGF.VoidPtrTy, CGF.Int8Ty);
+  return std::make_pair(NumOfElements, AccessArray);
+}
+
 Address CGOpenMPRuntime::emitDepobjDependClause(
     CodeGenFunction &CGF, const OMPTaskDataTy::DependData &Dependencies,
     SourceLocation Loc) {
@@ -4524,36 +4646,50 @@ void CGOpenMPRuntime::emitTaskCall(CodeGenFunction &CGF, SourceLocation Loc,
   std::tie(NumOfElements, DependenciesArray) =
       emitDependClause(CGF, Data.Dependences, Loc);
 
+  // Process list of accesses.
+  Address AccessArray = Address::invalid();
+  llvm::Value *NumOfAccesses;
+  std::tie(NumOfAccesses, AccessArray) =
+      emitAccessClause(CGF, Data.Accesses, Loc);
+
+  bool HasDeps = !Data.Dependences.empty();
+  bool HasAccesses = NumOfAccesses != nullptr;
+  bool HasDepsOrAccesses = HasDeps || HasAccesses;
+
   // NOTE: routine and part_id fields are initialized by __kmpc_omp_task_alloc()
   // libcall.
-  // Build kmp_int32 __kmpc_omp_task_with_deps(ident_t *, kmp_int32 gtid,
+  // Build kmp_int32 __kmpc_omp_task_with_deps_v2(ident_t *, kmp_int32 gtid,
   // kmp_task_t *new_task, kmp_int32 ndeps, kmp_depend_info_t *dep_list,
-  // kmp_int32 ndeps_noalias, kmp_depend_info_t *noalias_dep_list) if dependence
-  // list is not empty
+  // kmp_int32 ndeps_noalias, kmp_depend_info_t *noalias_dep_list,
+  // kmp_int32 nacs, kmp_access_info_t *acs_list)
   llvm::Value *ThreadID = getThreadID(CGF, Loc);
   llvm::Value *UpLoc = emitUpdateLocation(CGF, Loc);
   llvm::Value *TaskArgs[] = { UpLoc, ThreadID, NewTask };
-  llvm::Value *DepTaskArgs[7];
-  if (!Data.Dependences.empty()) {
+  llvm::Value *DepTaskArgs[9];
+  if (HasDepsOrAccesses) {
     DepTaskArgs[0] = UpLoc;
     DepTaskArgs[1] = ThreadID;
     DepTaskArgs[2] = NewTask;
-    DepTaskArgs[3] = NumOfElements;
-    DepTaskArgs[4] = DependenciesArray.emitRawPointer(CGF);
+    DepTaskArgs[3] = HasDeps ? NumOfElements : CGF.Builder.getInt32(0);
+    DepTaskArgs[4] = HasDeps ? DependenciesArray.emitRawPointer(CGF)
+                             : llvm::ConstantPointerNull::get(CGF.VoidPtrTy);
     DepTaskArgs[5] = CGF.Builder.getInt32(0);
     DepTaskArgs[6] = llvm::ConstantPointerNull::get(CGF.VoidPtrTy);
+    DepTaskArgs[7] = HasAccesses ? NumOfAccesses : CGF.Builder.getInt32(0);
+    DepTaskArgs[8] = HasAccesses ? AccessArray.emitRawPointer(CGF)
+                                 : llvm::ConstantPointerNull::get(CGF.VoidPtrTy);
   }
   auto &&ThenCodeGen = [this, &Data, TDBase, KmpTaskTQTyRD, &TaskArgs,
-                        &DepTaskArgs](CodeGenFunction &CGF, PrePostActionTy &) {
+                        &DepTaskArgs, HasDepsOrAccesses](CodeGenFunction &CGF, PrePostActionTy &) {
     if (!Data.Tied) {
       auto PartIdFI = std::next(KmpTaskTQTyRD->field_begin(), KmpTaskTPartId);
       LValue PartIdLVal = CGF.EmitLValueForField(TDBase, *PartIdFI);
       CGF.EmitStoreOfScalar(CGF.Builder.getInt32(0), PartIdLVal);
     }
-    if (!Data.Dependences.empty()) {
+    if (HasDepsOrAccesses) {
       CGF.EmitRuntimeCall(
           OMPBuilder.getOrCreateRuntimeFunction(
-              CGM.getModule(), OMPRTL___kmpc_omp_task_with_deps),
+              CGM.getModule(), OMPRTL___kmpc_omp_task_with_deps_v2),
           DepTaskArgs);
     } else {
       CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
@@ -4566,30 +4702,45 @@ void CGOpenMPRuntime::emitTaskCall(CodeGenFunction &CGF, SourceLocation Loc,
       Region->emitUntiedSwitch(CGF);
   };
 
-  llvm::Value *DepWaitTaskArgs[7];
-  if (!Data.Dependences.empty()) {
+  // For the ElseCodeGen (if0) path, we need to wait on deps and/or accesses
+  // before inlining the task body.
+  llvm::Value *DepWaitTaskArgs[9];
+  bool UseV2Wait = HasAccesses;
+  if (HasDepsOrAccesses) {
     DepWaitTaskArgs[0] = UpLoc;
     DepWaitTaskArgs[1] = ThreadID;
-    DepWaitTaskArgs[2] = NumOfElements;
-    DepWaitTaskArgs[3] = DependenciesArray.emitRawPointer(CGF);
+    DepWaitTaskArgs[2] = HasDeps ? NumOfElements : CGF.Builder.getInt32(0);
+    DepWaitTaskArgs[3] = HasDeps ? DependenciesArray.emitRawPointer(CGF)
+                                 : llvm::ConstantPointerNull::get(CGF.VoidPtrTy);
     DepWaitTaskArgs[4] = CGF.Builder.getInt32(0);
     DepWaitTaskArgs[5] = llvm::ConstantPointerNull::get(CGF.VoidPtrTy);
     DepWaitTaskArgs[6] =
         llvm::ConstantInt::get(CGF.Int32Ty, Data.HasNowaitClause);
+    if (UseV2Wait) {
+      DepWaitTaskArgs[7] = NumOfAccesses;
+      DepWaitTaskArgs[8] = AccessArray.emitRawPointer(CGF);
+    }
   }
   auto &M = CGM.getModule();
   auto &&ElseCodeGen = [this, &M, &TaskArgs, ThreadID, NewTaskNewTaskTTy,
-                        TaskEntry, &Data, &DepWaitTaskArgs,
-                        Loc](CodeGenFunction &CGF, PrePostActionTy &) {
+                        TaskEntry, &Data, &DepWaitTaskArgs, UseV2Wait,
+                        HasDepsOrAccesses, Loc](CodeGenFunction &CGF, PrePostActionTy &) {
     CodeGenFunction::RunCleanupsScope LocalScope(CGF);
-    // Build void __kmpc_omp_wait_deps(ident_t *, kmp_int32 gtid,
-    // kmp_int32 ndeps, kmp_depend_info_t *dep_list, kmp_int32
-    // ndeps_noalias, kmp_depend_info_t *noalias_dep_list); if dependence info
-    // is specified.
-    if (!Data.Dependences.empty())
-      CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
-                              M, OMPRTL___kmpc_omp_taskwait_deps_51),
-                          DepWaitTaskArgs);
+    // Wait on deps and/or accesses before inlining the task body.
+    if (HasDepsOrAccesses) {
+      if (UseV2Wait) {
+        // Use v2 which passes both deps and accesses.
+        CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
+                                M, OMPRTL___kmpc_omp_taskwait_deps_51_v2),
+                            DepWaitTaskArgs);
+      } else {
+        // Only deps, use original taskwait_deps_51 (7 args).
+        llvm::ArrayRef<llvm::Value *> Args7(DepWaitTaskArgs, 7);
+        CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
+                                M, OMPRTL___kmpc_omp_taskwait_deps_51),
+                            Args7);
+      }
+    }
     // Call proxy_task_entry(gtid, new_task);
     auto &&CodeGen = [TaskEntry, ThreadID, NewTaskNewTaskTTy,
                       Loc](CodeGenFunction &CGF, PrePostActionTy &Action) {
@@ -5895,7 +6046,8 @@ void CGOpenMPRuntime::emitTaskwaitCall(CodeGenFunction &CGF, SourceLocation Loc,
   if (!CGF.HaveInsertPoint())
     return;
 
-  if (CGF.CGM.getLangOpts().OpenMPIRBuilder && Data.Dependences.empty()) {
+  if (CGF.CGM.getLangOpts().OpenMPIRBuilder && Data.Dependences.empty() &&
+      Data.Accesses.empty()) {
     // TODO: Need to support taskwait with dependences in the OpenMPIRBuilder.
     OMPBuilder.createTaskwait(CGF.Builder);
   } else {
@@ -5906,26 +6058,55 @@ void CGOpenMPRuntime::emitTaskwaitCall(CodeGenFunction &CGF, SourceLocation Loc,
     llvm::Value *NumOfElements;
     std::tie(NumOfElements, DependenciesArray) =
         emitDependClause(CGF, Data.Dependences, Loc);
-    if (!Data.Dependences.empty()) {
-      llvm::Value *DepWaitTaskArgs[7];
-      DepWaitTaskArgs[0] = UpLoc;
-      DepWaitTaskArgs[1] = ThreadID;
-      DepWaitTaskArgs[2] = NumOfElements;
-      DepWaitTaskArgs[3] = DependenciesArray.emitRawPointer(CGF);
-      DepWaitTaskArgs[4] = CGF.Builder.getInt32(0);
-      DepWaitTaskArgs[5] = llvm::ConstantPointerNull::get(CGF.VoidPtrTy);
-      DepWaitTaskArgs[6] =
-          llvm::ConstantInt::get(CGF.Int32Ty, Data.HasNowaitClause);
 
+    // Process list of accesses.
+    Address AccessArray = Address::invalid();
+    llvm::Value *NumOfAccesses;
+    std::tie(NumOfAccesses, AccessArray) =
+        emitAccessClause(CGF, Data.Accesses, Loc);
+
+    bool HasDeps = !Data.Dependences.empty();
+    bool HasAccesses = NumOfAccesses != nullptr;
+
+    if (HasDeps || HasAccesses) {
       CodeGenFunction::RunCleanupsScope LocalScope(CGF);
 
-      // Build void __kmpc_omp_taskwait_deps_51(ident_t *, kmp_int32 gtid,
-      // kmp_int32 ndeps, kmp_depend_info_t *dep_list, kmp_int32
-      // ndeps_noalias, kmp_depend_info_t *noalias_dep_list,
-      // kmp_int32 has_no_wait); if dependence info is specified.
-      CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
-                              M, OMPRTL___kmpc_omp_taskwait_deps_51),
-                          DepWaitTaskArgs);
+      if (HasAccesses) {
+        // Build void __kmpc_omp_taskwait_deps_51_v2(ident_t *, kmp_int32 gtid,
+        // kmp_int32 ndeps, kmp_depend_info_t *dep_list, kmp_int32
+        // ndeps_noalias, kmp_depend_info_t *noalias_dep_list,
+        // kmp_int32 has_no_wait, kmp_int32 nacs,
+        // kmp_access_info_t *acs_list);
+        llvm::Value *DepWaitTaskArgs[9];
+        DepWaitTaskArgs[0] = UpLoc;
+        DepWaitTaskArgs[1] = ThreadID;
+        DepWaitTaskArgs[2] = HasDeps ? NumOfElements : CGF.Builder.getInt32(0);
+        DepWaitTaskArgs[3] = HasDeps ? DependenciesArray.emitRawPointer(CGF)
+                                     : llvm::ConstantPointerNull::get(CGF.VoidPtrTy);
+        DepWaitTaskArgs[4] = CGF.Builder.getInt32(0);
+        DepWaitTaskArgs[5] = llvm::ConstantPointerNull::get(CGF.VoidPtrTy);
+        DepWaitTaskArgs[6] =
+            llvm::ConstantInt::get(CGF.Int32Ty, Data.HasNowaitClause);
+        DepWaitTaskArgs[7] = NumOfAccesses;
+        DepWaitTaskArgs[8] = AccessArray.emitRawPointer(CGF);
+        CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
+                                M, OMPRTL___kmpc_omp_taskwait_deps_51_v2),
+                            DepWaitTaskArgs);
+      } else {
+        // Only deps, no accesses — use the original taskwait_deps_51.
+        llvm::Value *DepWaitTaskArgs[7];
+        DepWaitTaskArgs[0] = UpLoc;
+        DepWaitTaskArgs[1] = ThreadID;
+        DepWaitTaskArgs[2] = NumOfElements;
+        DepWaitTaskArgs[3] = DependenciesArray.emitRawPointer(CGF);
+        DepWaitTaskArgs[4] = CGF.Builder.getInt32(0);
+        DepWaitTaskArgs[5] = llvm::ConstantPointerNull::get(CGF.VoidPtrTy);
+        DepWaitTaskArgs[6] =
+            llvm::ConstantInt::get(CGF.Int32Ty, Data.HasNowaitClause);
+        CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
+                                M, OMPRTL___kmpc_omp_taskwait_deps_51),
+                            DepWaitTaskArgs);
+      }
 
     } else {
 
@@ -9618,6 +9799,41 @@ genMapInfo(MappableExprsHandler &MEHandler, CodeGenFunction &CGF,
   }
 }
 
+/// Generate map info entries for 'access' clause expressions in a target
+/// directive. Each access(modifier: expr) generates a map entry marked with
+/// the OMP_MAP_ACCESS flag. At runtime, these entries are resolved via
+/// xkomp_access_pointer(idx) where idx is the 0-based index among all access
+/// clause expressions on the directive, rather than through the standard
+/// host-to-device mapping lookup.
+static void genMapInfoForAccessClauses(
+    const OMPExecutableDirective &D, CodeGenFunction &CGF,
+    MappableExprsHandler::MapCombinedInfoTy &CombinedInfo) {
+  for (const auto *C : D.getClausesOfKind<OMPAccessClause>()) {
+    // Mark as TARGET_PARAM so the pointer is passed to the kernel, and
+    // ACCESS so the runtime identifies it for xkomp_access_pointer resolution.
+    OpenMPOffloadMappingFlags MapFlags =
+        OpenMPOffloadMappingFlags::OMP_MAP_TARGET_PARAM |
+        OpenMPOffloadMappingFlags::OMP_MAP_ACCESS;
+
+    for (const Expr *E : C->varlist()) {
+      llvm::Value *Addr;
+      llvm::Value *Size;
+      std::tie(Addr, Size) = getPointerAndSize(CGF, E);
+
+      CombinedInfo.Exprs.push_back(nullptr);
+      CombinedInfo.BasePointers.push_back(Addr);
+      CombinedInfo.DevicePtrDecls.push_back(nullptr);
+      CombinedInfo.DevicePointers.push_back(
+          MappableExprsHandler::DeviceInfoTy::None);
+      CombinedInfo.Pointers.push_back(Addr);
+      CombinedInfo.Sizes.push_back(CGF.Builder.CreateIntCast(
+          Size, CGF.Int64Ty, /*isSigned=*/true));
+      CombinedInfo.Types.push_back(MapFlags);
+      CombinedInfo.Mappers.push_back(nullptr);
+    }
+  }
+}
+
 static void genMapInfo(const OMPExecutableDirective &D, CodeGenFunction &CGF,
                        const CapturedStmt &CS,
                        llvm::SmallVectorImpl<llvm::Value *> &CapturedVars,
@@ -9630,6 +9846,9 @@ static void genMapInfo(const OMPExecutableDirective &D, CodeGenFunction &CGF,
   genMapInfoForCaptures(MEHandler, CGF, CS, CapturedVars, OMPBuilder,
                         MappedVarSet, CombinedInfo);
   genMapInfo(MEHandler, CGF, CombinedInfo, OMPBuilder, MappedVarSet);
+
+  // Generate map entries for access clause expressions.
+  genMapInfoForAccessClauses(D, CGF, CombinedInfo);
 }
 
 template <typename ClauseTy>

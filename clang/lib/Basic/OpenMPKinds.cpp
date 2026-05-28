@@ -41,6 +41,11 @@ unsigned clang::getOpenMPSimpleClauseType(OpenMPClauseKind Kind, StringRef Str,
   .Case(#Name, static_cast<unsigned>(OMPC_SCHEDULE_MODIFIER_##Name))
 #include "clang/Basic/OpenMPKinds.def"
         .Default(OMPC_SCHEDULE_unknown);
+  case OMPC_access:
+    return llvm::StringSwitch<unsigned>(Str)
+#define OPENMP_ACCESS_MODIFIER(Name) .Case(#Name, OMPC_ACCESS_##Name)
+#include "clang/Basic/OpenMPKinds.def"
+        .Default(OMPC_ACCESS_unknown);
   case OMPC_depend: {
     unsigned Type = llvm::StringSwitch<unsigned>(Str)
 #define OPENMP_DEPEND_KIND(Name) .Case(#Name, OMPC_DEPEND_##Name)
@@ -296,6 +301,16 @@ const char *clang::getOpenMPSimpleClauseTypeName(OpenMPClauseKind Kind,
 #include "clang/Basic/OpenMPKinds.def"
     }
     llvm_unreachable("Invalid OpenMP 'schedule' clause type");
+  case OMPC_access:
+    switch (Type) {
+    case OMPC_ACCESS_unknown:
+      return "unknown";
+#define OPENMP_ACCESS_MODIFIER(Name)                                           \
+    case OMPC_ACCESS_##Name:                                                   \
+      return #Name;
+#include "clang/Basic/OpenMPKinds.def"
+    }
+    llvm_unreachable("Invalid OpenMP 'access' clause modifier");
   case OMPC_depend:
     switch (Type) {
     case OMPC_DEPEND_unknown:

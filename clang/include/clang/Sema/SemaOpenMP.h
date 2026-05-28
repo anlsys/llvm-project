@@ -1156,7 +1156,9 @@ public:
         MotionModifiers;
     SmallVector<SourceLocation, NumberOfOMPMotionModifiers> MotionModifiersLoc;
     bool IsMapTypeImplicit = false;
+    bool IsVirtualAccess = false;
     SourceLocation ExtraModifierLoc;
+    SourceLocation VirtualAccessLoc;
     SourceLocation OriginalSharingModifierLoc;
     SourceLocation OmpAllMemoryLoc;
     SourceLocation
@@ -1271,6 +1273,12 @@ public:
                                     SourceLocation EndLoc);
   /// Called on well-formed 'depobj' pseudo clause.
   OMPClause *ActOnOpenMPDepobjClause(Expr *Depobj, SourceLocation StartLoc,
+                                     SourceLocation LParenLoc,
+                                     SourceLocation EndLoc);
+  /// Called on well-formed 'access' clause.
+  OMPClause *ActOnOpenMPAccessClause(const OMPAccessClause::AccessDataTy &Data,
+                                     ArrayRef<Expr *> VarList,
+                                     SourceLocation StartLoc,
                                      SourceLocation LParenLoc,
                                      SourceLocation EndLoc);
   /// Called on well-formed 'depend' clause.

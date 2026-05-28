@@ -51,6 +51,14 @@ enum OpenMPDeviceClauseModifier {
   OMPC_DEVICE_unknown,
 };
 
+/// OpenMP modifiers for 'access' clause.
+enum OpenMPAccessClauseModifier {
+#define OPENMP_ACCESS_MODIFIER(Name) \
+  OMPC_ACCESS_##Name,
+#include "clang/Basic/OpenMPKinds.def"
+  OMPC_ACCESS_unknown
+};
+
 /// OpenMP attributes for 'depend' clause.
 enum OpenMPDependClauseKind {
 #define OPENMP_DEPEND_KIND(Name) \

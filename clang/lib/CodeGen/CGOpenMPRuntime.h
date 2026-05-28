@@ -112,6 +112,15 @@ struct OMPTaskDataTy final {
         : DepKind(DepKind), IteratorExpr(IteratorExpr) {}
   };
   SmallVector<DependData, 4> Dependences;
+  struct AccessData {
+    OpenMPAccessClauseModifier Modifier = OMPC_ACCESS_unknown;
+    bool IsVirtual = false;
+    SmallVector<const Expr *, 4> AccExprs;
+    explicit AccessData() = default;
+    AccessData(OpenMPAccessClauseModifier Modifier, bool IsVirtual = false)
+        : Modifier(Modifier), IsVirtual(IsVirtual) {}
+  };
+  SmallVector<AccessData, 4> Accesses;
   llvm::PointerIntPair<llvm::Value *, 1, bool> Final;
   llvm::PointerIntPair<llvm::Value *, 1, bool> Schedule;
   llvm::PointerIntPair<llvm::Value *, 1, bool> Priority;
@@ -460,6 +469,12 @@ protected:
   ///    } flags;
   /// } kmp_depend_info_t;
   QualType KmpDependInfoTy;
+  /// Type typedef struct kmp_access_info {
+  ///    kmp_intptr_t base_addr;
+  ///    size_t       len;
+  ///    unsigned     flags;
+  /// } kmp_access_info_t;
+  QualType KmpAccessInfoTy;
   /// Type typedef struct kmp_task_affinity_info {
   ///    kmp_intptr_t base_addr;
   ///    size_t len;
@@ -1638,6 +1653,14 @@ public:
   std::pair<llvm::Value *, Address>
   emitDependClause(CodeGenFunction &CGF,
                    ArrayRef<OMPTaskDataTy::DependData> Dependencies,
+                   SourceLocation Loc);
+
+  /// Emits list of access entries based on the provided data (array of
+  /// access modifier/expression pairs).
+  /// \returns Pointer to the first element of the array casted to VoidPtr type.
+  std::pair<llvm::Value *, Address>
+  emitAccessClause(CodeGenFunction &CGF,
+                   ArrayRef<OMPTaskDataTy::AccessData> Accesses,
                    SourceLocation Loc);
 
   /// Emits list of dependecies based on the provided data (array of

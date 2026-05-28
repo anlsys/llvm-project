@@ -3334,6 +3334,12 @@ bool RecursiveASTVisitor<Derived>::VisitOMPClauseWithPostUpdate(
 }
 
 template <typename Derived>
+bool RecursiveASTVisitor<Derived>::VisitOMPAccessClause(OMPAccessClause *C) {
+  TRY_TO(VisitOMPClauseList(C));
+  return true;
+}
+
+template <typename Derived>
 bool RecursiveASTVisitor<Derived>::VisitOMPAllocatorClause(
     OMPAllocatorClause *C) {
   TRY_TO(TraverseStmt(C->getAllocator()));

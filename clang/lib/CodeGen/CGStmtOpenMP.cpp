@@ -4816,6 +4816,15 @@ public:
 };
 } // anonymous namespace
 
+static void buildAccesses(const OMPExecutableDirective &S,
+                          OMPTaskDataTy &Data) {
+  for (const auto *C : S.getClausesOfKind<OMPAccessClause>()) {
+    OMPTaskDataTy::AccessData &AD =
+        Data.Accesses.emplace_back(C->getAccessModifier(), C->isVirtual());
+    AD.AccExprs.append(C->varlist_begin(), C->varlist_end());
+  }
+}
+
 static void buildDependences(const OMPExecutableDirective &S,
                              OMPTaskDataTy &Data) {
 
@@ -4946,6 +4955,8 @@ void CodeGenFunction::EmitOMPTaskBasedDirective(
       *this, S.getBeginLoc(), LHSs, RHSs, Data);
   // Build list of dependences.
   buildDependences(S, Data);
+  // Build list of accesses.
+  buildAccesses(S, Data);
   // Get list of local vars for untied tasks.
   if (!Data.Tied) {
     CheckVarsEscapingUntiedTaskDeclContext Checker;
@@ -5339,6 +5350,7 @@ void CodeGenFunction::EmitOMPTargetTaskBasedDirective(
   }
   (void)TargetScope.Privatize();
   buildDependences(S, Data);
+  buildAccesses(S, Data);
   OpenMPDirectiveKind EKind = getEffectiveDirectiveKind(S);
   auto &&CodeGen = [&Data, &S, CS, &BodyGen, BPVD, PVD, SVD, MVD, EKind,
                     &InputInfo](CodeGenFunction &CGF, PrePostActionTy &Action) {
@@ -5558,6 +5570,8 @@ void CodeGenFunction::EmitOMPTaskwaitDirective(const OMPTaskwaitDirective &S) {
   OMPTaskDataTy Data;
   // Build list of dependences
   buildDependences(S, Data);
+  // Build list of accesses
+  buildAccesses(S, Data);
   Data.HasNowaitClause = S.hasClausesOfKind<OMPNowaitClause>();
   CGM.getOpenMPRuntime().emitTaskwaitCall(*this, S.getBeginLoc(), Data);
 }

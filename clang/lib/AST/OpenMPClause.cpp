@@ -1074,6 +1074,29 @@ OMPDepobjClause *OMPDepobjClause::CreateEmpty(const ASTContext &C) {
   return new (C) OMPDepobjClause();
 }
 
+OMPAccessClause *
+OMPAccessClause::Create(const ASTContext &C, SourceLocation StartLoc,
+                        SourceLocation LParenLoc, SourceLocation EndLoc,
+                        AccessDataTy Data, ArrayRef<Expr *> VL) {
+  void *Mem = C.Allocate(totalSizeToAlloc<Expr *>(VL.size()),
+                         alignof(OMPAccessClause));
+  OMPAccessClause *Clause =
+      new (Mem) OMPAccessClause(StartLoc, LParenLoc, EndLoc, VL.size());
+  Clause->setModifier(Data.Modifier);
+  Clause->setIsVirtual(Data.IsVirtual);
+  Clause->setModifierLoc(Data.ModifierLoc);
+  Clause->setVirtualLoc(Data.VirtualLoc);
+  Clause->setColonLoc(Data.ColonLoc);
+  Clause->setVarRefs(VL);
+  return Clause;
+}
+
+OMPAccessClause *OMPAccessClause::CreateEmpty(const ASTContext &C, unsigned N) {
+  void *Mem =
+      C.Allocate(totalSizeToAlloc<Expr *>(N), alignof(OMPAccessClause));
+  return new (Mem) OMPAccessClause(N);
+}
+
 OMPDependClause *
 OMPDependClause::Create(const ASTContext &C, SourceLocation StartLoc,
                         SourceLocation LParenLoc, SourceLocation EndLoc,
@@ -2474,6 +2497,18 @@ void OMPClausePrinter::VisitOMPFlushClause(OMPFlushClause *Node) {
 void OMPClausePrinter::VisitOMPDepobjClause(OMPDepobjClause *Node) {
   OS << "(";
   Node->getDepobj()->printPretty(OS, nullptr, Policy, 0);
+  OS << ")";
+}
+
+void OMPClausePrinter::VisitOMPAccessClause(OMPAccessClause *Node) {
+  OS << "access(";
+  if (Node->isVirtual())
+    OS << "virtual, ";
+  OS << getOpenMPSimpleClauseTypeName(Node->getClauseKind(),
+                                      Node->getAccessModifier());
+  if (!Node->varlist_empty())
+    OS << " :";
+  VisitOMPClauseList(Node, ' ');
   OS << ")";
 }
 

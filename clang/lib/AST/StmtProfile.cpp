@@ -857,6 +857,9 @@ void OMPClauseProfiler::VisitOMPDepobjClause(const OMPDepobjClause *C) {
   if (const Expr *Depobj = C->getDepobj())
     Profiler->VisitStmt(Depobj);
 }
+void OMPClauseProfiler::VisitOMPAccessClause(const OMPAccessClause *C) {
+  VisitOMPClauseList(C);
+}
 void OMPClauseProfiler::VisitOMPDependClause(const OMPDependClause *C) {
   VisitOMPClauseList(C);
 }

@@ -351,7 +351,8 @@ __OMP_RTL(__kmpc_end_single, false, Void, IdentPtr, Int32)
 __OMP_RTL(__kmpc_omp_task_alloc, false, /* kmp_task_t */ VoidPtr, IdentPtr,
           Int32, Int32, SizeTy, SizeTy, TaskRoutineEntryPtr)
 __OMP_RTL(__kmpc_omp_task_alloc_with_deps, false, /* kmp_task_t */ VoidPtr, IdentPtr,
-          Int32, Int32, SizeTy, SizeTy, TaskRoutineEntryPtr, Int32)
+          Int32, Int32, SizeTy, SizeTy, TaskRoutineEntryPtr, Int32,
+          /* nacs */ Int32)
 __OMP_RTL(__kmpc_omp_task, false, Int32, IdentPtr, Int32,
           /* kmp_task_t */ VoidPtr)
 __OMP_RTL(__kmpc_end_taskgroup, false, Void, IdentPtr, Int32)
@@ -364,6 +365,11 @@ __OMP_RTL(__kmpc_omp_task_with_deps, false, Int32, IdentPtr, Int32,
           /* kmp_task_t */ VoidPtr, Int32,
           /* kmp_depend_info_t */ VoidPtr, Int32,
           /* kmp_depend_info_t */ VoidPtr)
+__OMP_RTL(__kmpc_omp_task_with_deps_v2, false, Int32, IdentPtr, Int32,
+          /* kmp_task_t */ VoidPtr, Int32,
+          /* kmp_depend_info_t */ VoidPtr, Int32,
+          /* kmp_depend_info_t */ VoidPtr, Int32,
+          /* kmp_access_info_t */ VoidPtr)
 __OMP_RTL(__kmpc_taskloop, false, Void, IdentPtr, /* Int */ Int32, VoidPtr,
           /* Int */ Int32, Int64Ptr, Int64Ptr, Int64, /* Int */ Int32,
           /* Int */ Int32, Int64, VoidPtr)
@@ -373,7 +379,8 @@ __OMP_RTL(__kmpc_taskloop_5, false, Void, IdentPtr, /* Int */ Int32, VoidPtr,
 __OMP_RTL(__kmpc_omp_target_task_alloc, false, /* kmp_task_t */ VoidPtr,
           IdentPtr, Int32, Int32, SizeTy, SizeTy, TaskRoutineEntryPtr, Int64)
 __OMP_RTL(__kmpc_omp_target_task_alloc_with_deps, false, /* kmp_task_t */ VoidPtr,
-          IdentPtr, Int32, Int32, SizeTy, SizeTy, TaskRoutineEntryPtr, Int64, Int32)
+          IdentPtr, Int32, Int32, SizeTy, SizeTy, TaskRoutineEntryPtr, Int64, Int32,
+          /* nacs */ Int32)
 __OMP_RTL(__kmpc_taskred_modifier_init, false, /* kmp_taskgroup */ VoidPtr,
           IdentPtr, /* Int */ Int32, /* Int */ Int32, /* Int */ Int32, VoidPtr)
 __OMP_RTL(__kmpc_taskred_init, false, /* kmp_taskgroup */ VoidPtr,
@@ -391,6 +398,9 @@ __OMP_RTL(__kmpc_omp_wait_deps, false, Void, IdentPtr, Int32, Int32,
           /* kmp_depend_info_t */ VoidPtr, Int32, VoidPtr)
 __OMP_RTL(__kmpc_omp_taskwait_deps_51, false, Void, IdentPtr, Int32, Int32,
           /* kmp_depend_info_t */ VoidPtr, Int32, VoidPtr, Int32)
+__OMP_RTL(__kmpc_omp_taskwait_deps_51_v2, false, Void, IdentPtr, Int32, Int32,
+          /* kmp_depend_info_t */ VoidPtr, Int32, VoidPtr, Int32,
+          Int32, /* kmp_access_info_t */ VoidPtr)
 __OMP_RTL(__kmpc_cancellationpoint, false, Int32, IdentPtr, Int32, Int32)
 
 __OMP_RTL(__kmpc_fork_teams, true, Void, IdentPtr, Int32, ParallelTaskPtr)
@@ -919,7 +929,7 @@ __OMP_RTL_ATTRS(__kmpc_omp_task_alloc, DefaultAttrs, ReturnPtrAttrs,
                            ReadOnlyPtrAttrs))
 __OMP_RTL_ATTRS(__kmpc_omp_task_alloc_with_deps, DefaultAttrs, ReturnPtrAttrs,
                 ParamAttrs(ReadOnlyPtrAttrs, SExt, SExt, SizeTyExt, SizeTyExt,
-                           ReadOnlyPtrAttrs, SExt))
+                           ReadOnlyPtrAttrs, SExt, SExt))
 __OMP_RTL_ATTRS(__kmpc_omp_task, DefaultAttrs, SExt,
                 ParamAttrs(ReadOnlyPtrAttrs, SExt, AttributeSet()))
 __OMP_RTL_ATTRS(__kmpc_end_taskgroup, BarrierAttrs, AttributeSet(),
@@ -933,6 +943,10 @@ __OMP_RTL_ATTRS(__kmpc_omp_task_complete_if0, DefaultAttrs, AttributeSet(),
 __OMP_RTL_ATTRS(__kmpc_omp_task_with_deps, DefaultAttrs, SExt,
                 ParamAttrs(ReadOnlyPtrAttrs, SExt, AttributeSet(), SExt,
                            ReadOnlyPtrAttrs, SExt, ReadOnlyPtrAttrs))
+__OMP_RTL_ATTRS(__kmpc_omp_task_with_deps_v2, DefaultAttrs, SExt,
+                ParamAttrs(ReadOnlyPtrAttrs, SExt, AttributeSet(), SExt,
+                           ReadOnlyPtrAttrs, SExt, ReadOnlyPtrAttrs, SExt,
+                           ReadOnlyPtrAttrs))
 __OMP_RTL_ATTRS(__kmpc_taskloop, DefaultAttrs, AttributeSet(),
                 ParamAttrs(ReadOnlyPtrAttrs, SExt, AttributeSet(), SExt,
                            ArgPtrAttrs, ArgPtrAttrs, AttributeSet(), SExt, SExt))
@@ -941,7 +955,7 @@ __OMP_RTL_ATTRS(__kmpc_omp_target_task_alloc, DefaultAttrs, ReturnPtrAttrs,
                            ReadOnlyPtrAttrs, AttributeSet()))
 __OMP_RTL_ATTRS(__kmpc_omp_target_task_alloc_with_deps, DefaultAttrs, ReturnPtrAttrs,
                 ParamAttrs(ReadOnlyPtrAttrs, SExt, SExt, SizeTyExt, SizeTyExt,
-                           ReadOnlyPtrAttrs, AttributeSet(), SExt))
+                           ReadOnlyPtrAttrs, AttributeSet(), SExt, SExt))
 __OMP_RTL_ATTRS(__kmpc_taskred_modifier_init, DefaultAttrs, AttributeSet(),
                 ParamAttrs(ReadOnlyPtrAttrs, SExt, SExt, SExt))
 __OMP_RTL_ATTRS(__kmpc_taskred_init, DefaultAttrs, AttributeSet(),
@@ -962,6 +976,9 @@ __OMP_RTL_ATTRS(__kmpc_omp_wait_deps, BarrierAttrs, AttributeSet(),
 __OMP_RTL_ATTRS(__kmpc_omp_taskwait_deps_51, BarrierAttrs, AttributeSet(),
                 ParamAttrs(ReadOnlyPtrAttrs, SExt, SExt, ReadOnlyPtrAttrs, SExt,
                            AttributeSet(), SExt))
+__OMP_RTL_ATTRS(__kmpc_omp_taskwait_deps_51_v2, BarrierAttrs, AttributeSet(),
+                ParamAttrs(ReadOnlyPtrAttrs, SExt, SExt, ReadOnlyPtrAttrs, SExt,
+                           AttributeSet(), SExt, SExt, ReadOnlyPtrAttrs))
 __OMP_RTL_ATTRS(__kmpc_cancellationpoint, DefaultAttrs, SExt,
                 ParamAttrs(ReadOnlyPtrAttrs, SExt, SExt))
 

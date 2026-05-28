@@ -8,6 +8,12 @@
 
 XKRT_NAMESPACE_USE;
 
+/// External function provided by the xkomp runtime.
+/// Given the index of an access clause expression on a target construct,
+/// returns the corresponding device pointer. The index is 0-based and
+/// counts across all access clause expressions in order of appearance.
+extern "C" void *xkomp_access_pointer(int idx);
+
 TableMap *getTableMap(void *HostPtr);
 
 ////////////////
@@ -84,6 +90,7 @@ __xktgt_target_kernel(
     llvm::SmallVector<ptrdiff_t> TgtOffsets;
 
     int NumClangLaunchArgs = KernelArgs->NumArgs;
+    int AccessIdx = 0; // running index for access clause expressions
     for (int32_t i = 0; i < NumClangLaunchArgs ; ++i)
     {
         assert(KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_TARGET_PARAM);
@@ -93,7 +100,14 @@ __xktgt_target_kernel(
         ptrdiff_t TgtBaseOffset;
         TargetPointerResultTy TPR;
 
-        if (KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_LITERAL)
+        if (KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_ACCESS)
+        {
+            // Access clause entry: resolve via xkomp_access_pointer(idx)
+            // instead of the standard host-to-device mapping lookup.
+            TgtPtrBegin = xkomp_access_pointer(AccessIdx++);
+            TgtBaseOffset = 0;
+        }
+        else if (KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_LITERAL)
         {
             TgtPtrBegin = HstPtrBase;
             TgtBaseOffset = 0;

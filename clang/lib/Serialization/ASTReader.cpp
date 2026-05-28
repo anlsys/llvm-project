@@ -11270,6 +11270,11 @@ OMPClause *OMPClauseReader::readClause() {
   case llvm::omp::OMPC_depobj:
     C = OMPDepobjClause::CreateEmpty(Context);
     break;
+  case llvm::omp::OMPC_access: {
+    unsigned NumVars = Record.readInt();
+    C = OMPAccessClause::CreateEmpty(Context, NumVars);
+    break;
+  }
   case llvm::omp::OMPC_depend: {
     unsigned NumVars = Record.readInt();
     unsigned NumLoops = Record.readInt();
@@ -12023,6 +12028,21 @@ void OMPClauseReader::VisitOMPFlushClause(OMPFlushClause *C) {
 void OMPClauseReader::VisitOMPDepobjClause(OMPDepobjClause *C) {
   C->setDepobj(Record.readSubExpr());
   C->setLParenLoc(Record.readSourceLocation());
+}
+
+void OMPClauseReader::VisitOMPAccessClause(OMPAccessClause *C) {
+  C->setLParenLoc(Record.readSourceLocation());
+  C->setModifier(static_cast<OpenMPAccessClauseModifier>(Record.readInt()));
+  C->setIsVirtual(Record.readBool());
+  C->setModifierLoc(Record.readSourceLocation());
+  C->setVirtualLoc(Record.readSourceLocation());
+  C->setColonLoc(Record.readSourceLocation());
+  unsigned NumVars = C->varlist_size();
+  SmallVector<Expr *, 16> Vars;
+  Vars.reserve(NumVars);
+  for (unsigned I = 0; I != NumVars; ++I)
+    Vars.push_back(Record.readSubExpr());
+  C->setVarRefs(Vars);
 }
 
 void OMPClauseReader::VisitOMPDependClause(OMPDependClause *C) {

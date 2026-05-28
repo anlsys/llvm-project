@@ -38,6 +38,11 @@
 #include <vector>
 
 using llvm::SmallVector;
+
+/// External function provided by the xkomp runtime.
+/// Given the index of an access clause expression on a target construct,
+/// returns the corresponding device pointer.
+extern "C" void *xkomp_access_pointer(int idx);
 #ifdef OMPT_SUPPORT
 using namespace llvm::omp::target::ompt;
 #endif
@@ -1222,6 +1227,7 @@ int processDataBefore(ident_t *Loc, int64_t DeviceId, void *HostPtr,
   // List of (first-)private arrays allocated for this target region
   SmallVector<int> TgtArgsPositions(ArgNum, -1);
 
+  int AccessIdx = 0; // running index for access clause expressions
   for (int32_t I = 0; I < ArgNum; ++I) {
     if (!(ArgTypes[I] & OMP_TGT_MAPTYPE_TARGET_PARAM)) {
       // This is not a target parameter, do not push it into TgtArgs.
@@ -1277,7 +1283,12 @@ int processDataBefore(ident_t *Loc, int64_t DeviceId, void *HostPtr,
     map_var_info_t HstPtrName = (!ArgNames) ? nullptr : ArgNames[I];
     ptrdiff_t TgtBaseOffset;
     TargetPointerResultTy TPR;
-    if (ArgTypes[I] & OMP_TGT_MAPTYPE_LITERAL) {
+    if (ArgTypes[I] & OMP_TGT_MAPTYPE_ACCESS) {
+      // Access clause entry: resolve via xkomp_access_pointer(idx) instead
+      // of the standard host-to-device mapping lookup.
+      TgtPtrBegin = xkomp_access_pointer(AccessIdx++);
+      TgtBaseOffset = 0;
+    } else if (ArgTypes[I] & OMP_TGT_MAPTYPE_LITERAL) {
       DP("Forwarding first-private value " DPxMOD " to the target construct\n",
          DPxPTR(HstPtrBase));
       TgtPtrBegin = HstPtrBase;

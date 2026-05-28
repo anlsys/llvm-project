@@ -13219,9 +13219,19 @@ StmtResult SemaOpenMP::ActOnOpenMPTargetUpdateDirective(
 
   setBranchProtectedScope(SemaRef, OMPD_target_update, AStmt);
 
-  if (!hasClauses(Clauses, OMPC_to, OMPC_from)) {
-    Diag(StartLoc, diag::err_omp_at_least_one_motion_clause_required);
-    return StmtError();
+  // A 'target update' is valid if it has a 'to' or 'from' clause, or if it
+  // has an 'access' clause with a non-virtual 'read' modifier.
+  bool HasMotionClause = hasClauses(Clauses, OMPC_to, OMPC_from);
+  if (!HasMotionClause) {
+    bool HasNonVirtualReadAccess = llvm::any_of(Clauses, [](const OMPClause *C) {
+      if (const auto *AC = dyn_cast<OMPAccessClause>(C))
+        return AC->getAccessModifier() == OMPC_ACCESS_read && !AC->isVirtual();
+      return false;
+    });
+    if (!HasNonVirtualReadAccess) {
+      Diag(StartLoc, diag::err_omp_at_least_one_motion_clause_required);
+      return StmtError();
+    }
   }
 
   if (!isClauseMappable(Clauses)) {
@@ -17543,6 +17553,15 @@ OMPClause *SemaOpenMP::ActOnOpenMPVarListClause(OpenMPClauseKind Kind,
   case OMPC_flush:
     Res = ActOnOpenMPFlushClause(VarList, StartLoc, LParenLoc, EndLoc);
     break;
+  case OMPC_access:
+    assert(0 <= ExtraModifier && ExtraModifier <= OMPC_ACCESS_unknown &&
+           "Unexpected access modifier.");
+    Res = ActOnOpenMPAccessClause(
+        {static_cast<OpenMPAccessClauseModifier>(ExtraModifier),
+         Data.IsVirtualAccess, ExtraModifierLoc, Data.VirtualAccessLoc,
+         ColonLoc},
+        VarList, StartLoc, LParenLoc, EndLoc);
+    break;
   case OMPC_depend:
     assert(0 <= ExtraModifier && ExtraModifier <= OMPC_DEPEND_unknown &&
            "Unexpected depend modifier.");
@@ -20460,6 +20479,57 @@ ProcessOpenMPDoacrossClauseCommon(Sema &SemaRef, bool IsSource,
         << 1 << Stack->getParentLoopControlVariable(VarList.size() + 1);
   }
   return {Vars, OpsOffs, TotalDepCount};
+}
+
+OMPClause *SemaOpenMP::ActOnOpenMPAccessClause(
+    const OMPAccessClause::AccessDataTy &Data, ArrayRef<Expr *> VarList,
+    SourceLocation StartLoc, SourceLocation LParenLoc,
+    SourceLocation EndLoc) {
+  OpenMPAccessClauseModifier Modifier = Data.Modifier;
+  SourceLocation ModifierLoc = Data.ModifierLoc;
+
+  if (Modifier == OMPC_ACCESS_unknown) {
+    Diag(ModifierLoc, diag::err_omp_unexpected_clause_value)
+        << "'read', 'write' or 'storage'"
+        << getOpenMPClauseNameForDiag(OMPC_access);
+    return nullptr;
+  }
+
+  // 'virtual' can only be combined with 'read' or 'write', not 'storage'.
+  if (Data.IsVirtual && Modifier == OMPC_ACCESS_storage) {
+    Diag(Data.VirtualLoc, diag::err_omp_unexpected_clause_value)
+        << "'virtual' modifier cannot be used with 'storage'"
+        << getOpenMPClauseNameForDiag(OMPC_access);
+    return nullptr;
+  }
+
+  SmallVector<Expr *, 8> Vars;
+  for (Expr *RefExpr : VarList) {
+    assert(RefExpr && "NULL expr in OpenMP access clause.");
+    if (isa<DependentScopeDeclRefExpr>(RefExpr)) {
+      // It will be analyzed later.
+      Vars.push_back(RefExpr);
+      continue;
+    }
+
+    SourceLocation ELoc = RefExpr->getExprLoc();
+    Expr *SimpleExpr = RefExpr->IgnoreParenCasts();
+
+    // The expression must be an array section (lvalue).
+    if (!SimpleExpr->isLValue()) {
+      Diag(ELoc, diag::err_omp_expected_addressable_lvalue_or_array_item)
+          << 0 << RefExpr->getSourceRange();
+      continue;
+    }
+
+    Vars.push_back(RefExpr);
+  }
+
+  if (Vars.empty())
+    return nullptr;
+
+  return OMPAccessClause::Create(getASTContext(), StartLoc, LParenLoc, EndLoc,
+                                 Data, Vars);
 }
 
 OMPClause *SemaOpenMP::ActOnOpenMPDependClause(

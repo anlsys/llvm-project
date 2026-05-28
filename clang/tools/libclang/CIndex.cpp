@@ -2747,6 +2747,9 @@ void OMPClauseEnqueue::VisitOMPFlushClause(const OMPFlushClause *C) {
 void OMPClauseEnqueue::VisitOMPDepobjClause(const OMPDepobjClause *C) {
   Visitor->AddStmt(C->getDepobj());
 }
+void OMPClauseEnqueue::VisitOMPAccessClause(const OMPAccessClause *C) {
+  VisitOMPClauseList(C);
+}
 void OMPClauseEnqueue::VisitOMPDependClause(const OMPDependClause *C) {
   VisitOMPClauseList(C);
 }

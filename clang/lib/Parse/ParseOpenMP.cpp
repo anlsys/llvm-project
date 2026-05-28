@@ -3217,6 +3217,7 @@ OMPClause *Parser::ParseOpenMPClause(OpenMPDirectiveKind DKind,
   case OMPC_reduction:
   case OMPC_task_reduction:
   case OMPC_in_reduction:
+  case OMPC_access:
   case OMPC_linear:
   case OMPC_aligned:
   case OMPC_copyin:
@@ -4474,6 +4475,38 @@ bool Parser::ParseOpenMPVarList(OpenMPDirectiveKind DKind,
     if (!InvalidReductionId)
       Data.ReductionOrMapperId =
           Actions.GetNameFromUnqualifiedId(UnqualifiedReductionId);
+  } else if (Kind == OMPC_access) {
+    // Handle access modifiers: [virtual,] read|write|storage
+    ColonProtectionRAIIObject ColonRAII(*this);
+    // Check for optional 'virtual' modifier.
+    if (Tok.is(tok::identifier) && PP.getSpelling(Tok) == "virtual") {
+      Data.IsVirtualAccess = true;
+      Data.VirtualAccessLoc = Tok.getLocation();
+      ConsumeToken();
+      // Expect comma after 'virtual'.
+      if (Tok.is(tok::comma)) {
+        ConsumeToken();
+      } else {
+        Diag(Tok, diag::warn_pragma_expected_colon) << "','";
+      }
+    }
+    // Parse the primary modifier (read, write, storage).
+    Data.ExtraModifier = getOpenMPSimpleClauseType(
+        Kind, Tok.is(tok::identifier) ? PP.getSpelling(Tok) : "",
+        getLangOpts());
+    Data.ExtraModifierLoc = Tok.getLocation();
+    if (Data.ExtraModifier == OMPC_ACCESS_unknown) {
+      SkipUntil(tok::colon, tok::r_paren, tok::annot_pragma_openmp_end,
+                StopBeforeMatch);
+    } else {
+      ConsumeToken();
+    }
+    if (Tok.is(tok::colon)) {
+      Data.ColonLoc = ConsumeToken();
+    } else {
+      Diag(Tok, diag::warn_pragma_expected_colon)
+          << "access modifier";
+    }
   } else if (Kind == OMPC_depend || Kind == OMPC_doacross) {
     if (getLangOpts().OpenMP >= 50) {
       if (Tok.is(tok::identifier) && PP.getSpelling(Tok) == "iterator") {
