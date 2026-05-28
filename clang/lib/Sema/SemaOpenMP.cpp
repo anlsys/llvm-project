@@ -20502,6 +20502,20 @@ OMPClause *SemaOpenMP::ActOnOpenMPAccessClause(
     return nullptr;
   }
 
+  // 'storage' modifier is only allowed on 'target enter data' and
+  // 'target exit data' directives.
+  if (Mods & OMPC_ACCESS_FLAG_storage) {
+    OpenMPDirectiveKind DKind = DSAStack->getCurrentDirective();
+    if (DKind != OMPD_target_enter_data && DKind != OMPD_target_exit_data) {
+      unsigned OMPVersion = SemaRef.getLangOpts().OpenMP;
+      Diag(ModifierLoc, diag::err_omp_unexpected_clause_value)
+          << ("'storage' modifier is not allowed for '#pragma omp " +
+              getOpenMPDirectiveName(DKind, OMPVersion).str() + "'")
+          << getOpenMPClauseNameForDiag(OMPC_access);
+      return nullptr;
+    }
+  }
+
   SmallVector<Expr *, 8> Vars;
   for (Expr *RefExpr : VarList) {
     assert(RefExpr && "NULL expr in OpenMP access clause.");

@@ -4482,7 +4482,7 @@ bool Parser::ParseOpenMPVarList(OpenMPDirectiveKind DKind,
     unsigned ModifierFlags = 0;
     Data.ExtraModifierLoc = Tok.getLocation();
     bool ParsedAny = false;
-    while (Tok.is(tok::identifier)) {
+    while (Tok.is(tok::identifier) || Tok.is(tok::kw_virtual)) {
       auto Mod = static_cast<OpenMPAccessClauseModifier>(
           getOpenMPSimpleClauseType(
               Kind, PP.getSpelling(Tok), getLangOpts()));
