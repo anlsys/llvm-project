@@ -70,6 +70,14 @@ __xktgt_target_kernel_launch(
     // TODO: map to
     // TODO: firstprivate
 
+    // Get device/plugin — must happen before getTableMap() because
+    // PM->getDevice() triggers loadImagesOntoDevice() which populates
+    // the TargetsTable entries needed below.
+    auto DeviceOrErr = PM->getDevice(DeviceId);
+    if (!DeviceOrErr)
+        LOGGER_FATAL("Invalid device");
+    DeviceTy & Device = *DeviceOrErr;
+
     // get device function pointer
     TableMap *TM = getTableMap(HostPtr);
     __tgt_target_table *TargetTable = nullptr;
@@ -92,12 +100,6 @@ __xktgt_target_kernel_launch(
     // 'KernelArgs' will point to 'LocalKernelArgs' if it becomes upgraded, else it remains unchanged
     KernelArgsTy LocalKernelArgs;
     KernelArgs = upgradeKernelArgs(KernelArgs, LocalKernelArgs, NumTeams, ThreadLimit);
-
-    // Get device/plugin
-    auto DeviceOrErr = PM->getDevice(DeviceId);
-    if (!DeviceOrErr)
-        LOGGER_FATAL("Invalid device");
-    DeviceTy & Device = *DeviceOrErr;
 
     GenericPluginTy * GenericPlugin = Device.RTL;
     assert(GenericPlugin);
