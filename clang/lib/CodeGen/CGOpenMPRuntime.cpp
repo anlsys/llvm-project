@@ -9783,31 +9783,48 @@ genMapInfo(MappableExprsHandler &MEHandler, CodeGenFunction &CGF,
 /// xkomp_access_pointer(idx) where idx is the 0-based index among all access
 /// clause expressions on the directive, rather than through the standard
 /// host-to-device mapping lookup.
+/// Extract the base VarDecl from an expression that may be an array section,
+/// array subscript, or plain DeclRefExpr.
+static const VarDecl *getBaseVarDecl(const Expr *E) {
+  E = E->IgnoreParenImpCasts();
+  if (const auto *ASE = dyn_cast<ArraySectionExpr>(E))
+    return getBaseVarDecl(ASE->getBase());
+  if (const auto *ASE = dyn_cast<ArraySubscriptExpr>(E))
+    return getBaseVarDecl(ASE->getBase());
+  if (const auto *DRE = dyn_cast<DeclRefExpr>(E))
+    return dyn_cast<VarDecl>(DRE->getDecl());
+  return nullptr;
+}
+
 static void genMapInfoForAccessClauses(
     const OMPExecutableDirective &D, CodeGenFunction &CGF,
     MappableExprsHandler::MapCombinedInfoTy &CombinedInfo) {
   for (const auto *C : D.getClausesOfKind<OMPAccessClause>()) {
-    // Mark as TARGET_PARAM so the pointer is passed to the kernel, and
-    // ACCESS so the runtime identifies it for xkomp_access_pointer resolution.
-    OpenMPOffloadMappingFlags MapFlags =
-        OpenMPOffloadMappingFlags::OMP_MAP_TARGET_PARAM |
-        OpenMPOffloadMappingFlags::OMP_MAP_ACCESS;
-
     for (const Expr *E : C->varlist()) {
-      llvm::Value *Addr;
-      llvm::Value *Size;
-      std::tie(Addr, Size) = getPointerAndSize(CGF, E);
+      // Find the base variable declaration for this access expression.
+      const VarDecl *AccessVD = getBaseVarDecl(E);
+      if (!AccessVD)
+        continue;
+      const Decl *CanonDecl = AccessVD->getCanonicalDecl();
 
-      CombinedInfo.Exprs.push_back(nullptr);
-      CombinedInfo.BasePointers.push_back(Addr);
-      CombinedInfo.DevicePtrDecls.push_back(nullptr);
-      CombinedInfo.DevicePointers.push_back(
-          MappableExprsHandler::DeviceInfoTy::None);
-      CombinedInfo.Pointers.push_back(Addr);
-      CombinedInfo.Sizes.push_back(CGF.Builder.CreateIntCast(
-          Size, CGF.Int64Ty, /*isSigned=*/true));
-      CombinedInfo.Types.push_back(MapFlags);
-      CombinedInfo.Mappers.push_back(nullptr);
+      // Search existing map entries for one that refers to the same variable
+      // and add the OMP_MAP_ACCESS flag to it. The variable should already
+      // be captured and present in CombinedInfo from genMapInfoForCaptures.
+      bool Found = false;
+      for (unsigned I = 0, N = CombinedInfo.Exprs.size(); I < N; ++I) {
+        const ValueDecl *EntryVD = CombinedInfo.Exprs[I];
+        if (!EntryVD)
+          continue;
+        if (EntryVD->getCanonicalDecl() == CanonDecl) {
+          CombinedInfo.Types[I] |=
+              OpenMPOffloadMappingFlags::OMP_MAP_ACCESS;
+          Found = true;
+          break;
+        }
+      }
+      (void)Found;
+      assert(Found && "Access clause variable not found in map entries — "
+                      "it should be captured by the target region");
     }
   }
 }
