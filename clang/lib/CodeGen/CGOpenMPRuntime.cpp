@@ -4701,7 +4701,7 @@ void CGOpenMPRuntime::emitTaskCall(CodeGenFunction &CGF, SourceLocation Loc,
   }
   auto &M = CGM.getModule();
   auto &&ElseCodeGen = [this, &M, &TaskArgs, ThreadID, NewTaskNewTaskTTy,
-                        TaskEntry, &Data, &DepWaitTaskArgs, UseV2Wait,
+                        TaskEntry, &DepWaitTaskArgs, UseV2Wait,
                         HasDepsOrAccesses, Loc](CodeGenFunction &CGF, PrePostActionTy &) {
     CodeGenFunction::RunCleanupsScope LocalScope(CGF);
     // Wait on deps and/or accesses before inlining the task body.
@@ -9812,7 +9812,7 @@ static void genMapInfoForAccessClauses(
       // be captured and present in CombinedInfo from genMapInfoForCaptures.
       bool Found = false;
       for (unsigned I = 0, N = CombinedInfo.Exprs.size(); I < N; ++I) {
-        const ValueDecl *EntryVD = CombinedInfo.Exprs[I];
+        const ValueDecl *EntryVD = CombinedInfo.Exprs[I].getMapDecl();
         if (!EntryVD)
           continue;
         if (EntryVD->getCanonicalDecl() == CanonDecl) {
