@@ -13220,15 +13220,15 @@ StmtResult SemaOpenMP::ActOnOpenMPTargetUpdateDirective(
   setBranchProtectedScope(SemaRef, OMPD_target_update, AStmt);
 
   // A 'target update' is valid if it has a 'to' or 'from' clause, or if it
-  // has an 'access' clause with a non-virtual 'read' modifier.
+  // has an 'access' clause with a non-noncoherent 'read' modifier.
   bool HasMotionClause = hasClauses(Clauses, OMPC_to, OMPC_from);
   if (!HasMotionClause) {
-    bool HasNonVirtualReadAccess = llvm::any_of(Clauses, [](const OMPClause *C) {
+    bool HasNonNoncoherentReadAccess = llvm::any_of(Clauses, [](const OMPClause *C) {
       if (const auto *AC = dyn_cast<OMPAccessClause>(C))
-        return AC->hasRead() && !AC->isVirtual();
+        return AC->hasRead() && !AC->isNoncoherent();
       return false;
     });
-    if (!HasNonVirtualReadAccess) {
+    if (!HasNonNoncoherentReadAccess) {
       Diag(StartLoc, diag::err_omp_at_least_one_motion_clause_required);
       return StmtError();
     }
@@ -20493,11 +20493,20 @@ OMPClause *SemaOpenMP::ActOnOpenMPAccessClause(
     return nullptr;
   }
 
-  // 'virtual' can only appear if 'read' or 'write' is also present.
-  if ((Mods & OMPC_ACCESS_FLAG_virtual) &&
+  // 'noncoherent' can only appear if 'read' or 'write' is also present.
+  if ((Mods & OMPC_ACCESS_FLAG_noncoherent) &&
       !(Mods & (OMPC_ACCESS_FLAG_read | OMPC_ACCESS_FLAG_write))) {
     Diag(ModifierLoc, diag::err_omp_unexpected_clause_value)
-        << "'virtual' modifier requires 'read' or 'write'"
+        << "'noncoherent' modifier requires 'read' or 'write'"
+        << getOpenMPClauseNameForDiag(OMPC_access);
+    return nullptr;
+  }
+
+  // 'concurrent' can only appear if 'write' is also present.
+  if ((Mods & OMPC_ACCESS_FLAG_concurrent) &&
+      !(Mods & OMPC_ACCESS_FLAG_write)) {
+    Diag(ModifierLoc, diag::err_omp_unexpected_clause_value)
+        << "'concurrent' modifier requires 'write'"
         << getOpenMPClauseNameForDiag(OMPC_access);
     return nullptr;
   }

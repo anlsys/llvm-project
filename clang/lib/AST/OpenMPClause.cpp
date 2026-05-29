@@ -2510,7 +2510,8 @@ void OMPClausePrinter::VisitOMPAccessClause(OMPAccessClause *Node) {
       First = false;
     }
   };
-  PrintMod(OMPC_ACCESS_FLAG_virtual, "virtual");
+  PrintMod(OMPC_ACCESS_FLAG_noncoherent, "noncoherent");
+  PrintMod(OMPC_ACCESS_FLAG_concurrent, "concurrent");
   PrintMod(OMPC_ACCESS_FLAG_read, "read");
   PrintMod(OMPC_ACCESS_FLAG_write, "write");
   PrintMod(OMPC_ACCESS_FLAG_storage, "storage");
