@@ -345,8 +345,16 @@ __xktgt_target_data_update_nowait_mapper(
         TargetPointerResultTy TPR = Device.getMappingInfo().getTgtPtrBegin(HstPtrBegin, ArgSize, /*UpdateRefCount=*/false, /*UseHoldRefCount=*/false, /*MustContain=*/true);
         void * TgtPtrBegin = TPR.TargetPointer;
 
-        if (!TPR.isPresent())
-            LOGGER_FATAL("Data is not mapped");
+        if (!TPR.isPresent()) {
+            // Match vanilla LLVM behavior (omptarget.cpp targetDataContiguous):
+            // unmapped data in target update is a noop unless 'present' modifier.
+            if (ArgType & OMP_TGT_MAPTYPE_PRESENT)
+                LOGGER_FATAL("device mapping required by 'present' motion modifier "
+                             "does not exist for host address %p (%" PRId64 " bytes)",
+                             HstPtrBegin, ArgSize);
+            LOGGER_DEBUG("hst data %p not found in mapping, becomes a noop", HstPtrBegin);
+            continue ;
+        }
 
         if (TPR.Flags.IsHostPointer)
         {
@@ -437,8 +445,14 @@ __xktgt_target_data_update_mapper(
         TargetPointerResultTy TPR = Device.getMappingInfo().getTgtPtrBegin(HstPtrBegin, ArgSize, /*UpdateRefCount=*/false, /*UseHoldRefCount=*/false, /*MustContain=*/true);
         void * TgtPtrBegin = TPR.TargetPointer;
 
-        if (!TPR.isPresent())
-            LOGGER_FATAL("Data is not mapped");
+        if (!TPR.isPresent()) {
+            if (ArgType & OMP_TGT_MAPTYPE_PRESENT)
+                LOGGER_FATAL("device mapping required by 'present' motion modifier "
+                             "does not exist for host address %p (%" PRId64 " bytes)",
+                             HstPtrBegin, ArgSize);
+            LOGGER_DEBUG("hst data %p not found in mapping, becomes a noop", HstPtrBegin);
+            continue ;
+        }
 
         if (TPR.Flags.IsHostPointer)
         {
