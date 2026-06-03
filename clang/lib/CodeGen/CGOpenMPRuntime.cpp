@@ -4398,7 +4398,7 @@ std::pair<llvm::Value *, Address> CGOpenMPRuntime::emitAccessClause(
   unsigned Pos = 0;
   for (const OMPTaskDataTy::AccessData &Acc : Accesses) {
     // The bitmask (OMPC_ACCESS_FLAG_read=0x1, write=0x2, storage=0x4,
-    // noncoherent=0x8, concurrent=0x10) maps directly to the
+    // nostorage=0x8, noncoherent=0x10, concurrentwrite=0x20) maps directly to the
     // kmp_access_info_t.flags bitfield layout, so we forward it as-is.
     unsigned Flag = Acc.Modifiers;
     for (const Expr *E : Acc.AccExprs) {

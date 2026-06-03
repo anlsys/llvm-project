@@ -4477,7 +4477,7 @@ bool Parser::ParseOpenMPVarList(OpenMPDirectiveKind DKind,
           Actions.GetNameFromUnqualifiedId(UnqualifiedReductionId);
   } else if (Kind == OMPC_access) {
     // Handle comma-separated access modifiers: modifier [, modifier]* : exprs
-    // where modifier is one of: read, write, storage, noncoherent, concurrent
+    // where modifier is one of: read, write, storage, nostorage, noncoherent, concurrentwrite
     ColonProtectionRAIIObject ColonRAII(*this);
     unsigned ModifierFlags = 0;
     Data.ExtraModifierLoc = Tok.getLocation();
@@ -4501,7 +4501,7 @@ bool Parser::ParseOpenMPVarList(OpenMPDirectiveKind DKind,
     Data.ExtraModifier = static_cast<int>(ModifierFlags);
     if (!ParsedAny) {
       Diag(Tok, diag::err_omp_unexpected_clause_value)
-          << "'read', 'write', 'storage', 'noncoherent' or 'concurrent'"
+          << "'read', 'write', 'storage', 'nostorage', 'noncoherent' or 'concurrentwrite'"
           << getOpenMPClauseName(OMPC_access);
       SkipUntil(tok::colon, tok::r_paren, tok::annot_pragma_openmp_end,
                 StopBeforeMatch);

@@ -20484,11 +20484,13 @@ OMPClause *SemaOpenMP::ActOnOpenMPAccessClause(
   unsigned Mods = Data.Modifiers;
   SourceLocation ModifierLoc = Data.ModifierLoc;
 
-  // Must have at least one of read, write, or storage.
+  // Must have at least one of read, write, storage, nostorage, or
+  // concurrentwrite.
   if (!(Mods & (OMPC_ACCESS_FLAG_read | OMPC_ACCESS_FLAG_write |
-                OMPC_ACCESS_FLAG_storage))) {
+                OMPC_ACCESS_FLAG_storage | OMPC_ACCESS_FLAG_nostorage |
+                OMPC_ACCESS_FLAG_concurrentwrite))) {
     Diag(ModifierLoc, diag::err_omp_unexpected_clause_value)
-        << "'read', 'write' or 'storage'"
+        << "'read', 'write', 'storage', 'nostorage' or 'concurrentwrite'"
         << getOpenMPClauseNameForDiag(OMPC_access);
     return nullptr;
   }
@@ -20498,15 +20500,6 @@ OMPClause *SemaOpenMP::ActOnOpenMPAccessClause(
       !(Mods & (OMPC_ACCESS_FLAG_read | OMPC_ACCESS_FLAG_write))) {
     Diag(ModifierLoc, diag::err_omp_unexpected_clause_value)
         << "'noncoherent' modifier requires 'read' or 'write'"
-        << getOpenMPClauseNameForDiag(OMPC_access);
-    return nullptr;
-  }
-
-  // 'concurrent' can only appear if 'write' is also present.
-  if ((Mods & OMPC_ACCESS_FLAG_concurrent) &&
-      !(Mods & OMPC_ACCESS_FLAG_write)) {
-    Diag(ModifierLoc, diag::err_omp_unexpected_clause_value)
-        << "'concurrent' modifier requires 'write'"
         << getOpenMPClauseNameForDiag(OMPC_access);
     return nullptr;
   }

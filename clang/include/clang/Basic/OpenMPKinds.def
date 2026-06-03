@@ -103,8 +103,9 @@
 OPENMP_ACCESS_MODIFIER(read)
 OPENMP_ACCESS_MODIFIER(write)
 OPENMP_ACCESS_MODIFIER(storage)
+OPENMP_ACCESS_MODIFIER(nostorage)
 OPENMP_ACCESS_MODIFIER(noncoherent)
-OPENMP_ACCESS_MODIFIER(concurrent)
+OPENMP_ACCESS_MODIFIER(concurrentwrite)
 
 // Static attributes for 'schedule' clause.
 OPENMP_SCHEDULE_KIND(static)

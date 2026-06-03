@@ -5481,7 +5481,7 @@ class OMPAccessClause final
 public:
   struct AccessDataTy final {
     /// Bitmask of OpenMPAccessModifierFlag values (read, write, storage,
-    /// noncoherent, concurrent). Multiple modifiers can be combined.
+    /// noncoherent, nostorage, concurrentwrite). Multiple modifiers can be combined.
     unsigned Modifiers = 0;
 
     /// Location of the first modifier keyword.
@@ -5551,9 +5551,14 @@ public:
     return Data.Modifiers & OMPC_ACCESS_FLAG_noncoherent;
   }
 
-  /// Whether the 'concurrent' modifier is present.
-  bool isConcurrent() const {
-    return Data.Modifiers & OMPC_ACCESS_FLAG_concurrent;
+  /// Whether the 'concurrentwrite' modifier is present.
+  bool isConcurrentWrite() const {
+    return Data.Modifiers & OMPC_ACCESS_FLAG_concurrentwrite;
+  }
+
+  /// Whether the 'nostorage' modifier is present.
+  bool hasNoStorage() const {
+    return Data.Modifiers & OMPC_ACCESS_FLAG_nostorage;
   }
 
   /// Whether the 'read' modifier is present.

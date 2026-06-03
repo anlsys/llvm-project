@@ -65,19 +65,21 @@ enum OpenMPAccessModifierFlag : unsigned {
   OMPC_ACCESS_FLAG_read    = 0x1,
   OMPC_ACCESS_FLAG_write   = 0x2,
   OMPC_ACCESS_FLAG_storage = 0x4,
-  OMPC_ACCESS_FLAG_noncoherent = 0x8,
-  OMPC_ACCESS_FLAG_concurrent  = 0x10,
+  OMPC_ACCESS_FLAG_nostorage       = 0x8,
+  OMPC_ACCESS_FLAG_noncoherent     = 0x10,
+  OMPC_ACCESS_FLAG_concurrentwrite = 0x20,
 };
 
 /// Convert a single parsed access modifier enum to its bitmask flag.
 inline unsigned getAccessModifierFlag(OpenMPAccessClauseModifier M) {
   switch (M) {
-  case OMPC_ACCESS_read:         return OMPC_ACCESS_FLAG_read;
-  case OMPC_ACCESS_write:        return OMPC_ACCESS_FLAG_write;
-  case OMPC_ACCESS_storage:      return OMPC_ACCESS_FLAG_storage;
-  case OMPC_ACCESS_noncoherent:  return OMPC_ACCESS_FLAG_noncoherent;
-  case OMPC_ACCESS_concurrent:   return OMPC_ACCESS_FLAG_concurrent;
-  case OMPC_ACCESS_unknown:      return 0;
+  case OMPC_ACCESS_read:            return OMPC_ACCESS_FLAG_read;
+  case OMPC_ACCESS_write:           return OMPC_ACCESS_FLAG_write;
+  case OMPC_ACCESS_storage:         return OMPC_ACCESS_FLAG_storage;
+  case OMPC_ACCESS_nostorage:       return OMPC_ACCESS_FLAG_nostorage;
+  case OMPC_ACCESS_noncoherent:     return OMPC_ACCESS_FLAG_noncoherent;
+  case OMPC_ACCESS_concurrentwrite: return OMPC_ACCESS_FLAG_concurrentwrite;
+  case OMPC_ACCESS_unknown:         return 0;
   }
   return 0;
 }
