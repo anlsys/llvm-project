@@ -35,11 +35,6 @@ template <> struct DenseMapInfo<SymbolsMapKey> {
     return SymbolsMapKey(MachO::EncodeKind::GlobalSymbol, StringRef{});
   }
 
-  static inline SymbolsMapKey getTombstoneKey() {
-    return SymbolsMapKey(MachO::EncodeKind::ObjectiveCInstanceVariable,
-                         StringRef{});
-  }
-
   static unsigned getHashValue(const SymbolsMapKey &Key) {
     return hash_combine(hash_value(Key.Kind), hash_value(Key.Name));
   }
@@ -92,6 +87,9 @@ private:
 
 public:
   SymbolSet() = default;
+  SymbolSet(const SymbolSet &other) = delete;
+  SymbolSet &operator=(const SymbolSet &other) = delete;
+  LLVM_ABI ~SymbolSet();
   LLVM_ABI Symbol *addGlobal(EncodeKind Kind, StringRef Name, SymbolFlags Flags,
                              const Target &Targ);
   size_t size() const { return Symbols.size(); }
@@ -136,18 +134,14 @@ public:
       iterator_range<const_filtered_symbol_iterator>;
 
   // Range that contains all symbols.
-  const_symbol_range symbols() const {
-    return {Symbols.begin(), Symbols.end()};
-  }
+  const_symbol_range symbols() const { return Symbols; }
 
   // Range that contains all defined and exported symbols.
   const_filtered_symbol_range exports() const {
     std::function<bool(const Symbol *)> fn = [](const Symbol *Symbol) {
       return !Symbol->isUndefined() && !Symbol->isReexported();
     };
-    return make_filter_range(
-        make_range<const_symbol_iterator>({Symbols.begin()}, {Symbols.end()}),
-        fn);
+    return make_filter_range(symbols(), fn);
   }
 
   // Range that contains all reexported symbols.
@@ -155,9 +149,7 @@ public:
     std::function<bool(const Symbol *)> fn = [](const Symbol *Symbol) {
       return Symbol->isReexported();
     };
-    return make_filter_range(
-        make_range<const_symbol_iterator>({Symbols.begin()}, {Symbols.end()}),
-        fn);
+    return make_filter_range(symbols(), fn);
   }
 
   // Range that contains all undefined and exported symbols.
@@ -165,9 +157,7 @@ public:
     std::function<bool(const Symbol *)> fn = [](const Symbol *Symbol) {
       return Symbol->isUndefined();
     };
-    return make_filter_range(
-        make_range<const_symbol_iterator>({Symbols.begin()}, {Symbols.end()}),
-        fn);
+    return make_filter_range(symbols(), fn);
   }
 
   LLVM_ABI bool operator==(const SymbolSet &O) const;

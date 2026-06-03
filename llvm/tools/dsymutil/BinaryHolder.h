@@ -110,7 +110,7 @@ public:
       std::string Filename;
       TimestampTy Timestamp;
 
-      KeyTy() {}
+      KeyTy() = default;
       KeyTy(StringRef Filename, TimestampTy Timestamp)
           : Filename(Filename.str()), Timestamp(Timestamp) {}
     };
@@ -159,10 +159,6 @@ template <> struct DenseMapInfo<dsymutil::BinaryHolder::ArchiveEntry::KeyTy> {
 
   static inline dsymutil::BinaryHolder::ArchiveEntry::KeyTy getEmptyKey() {
     return dsymutil::BinaryHolder::ArchiveEntry::KeyTy();
-  }
-
-  static inline dsymutil::BinaryHolder::ArchiveEntry::KeyTy getTombstoneKey() {
-    return dsymutil::BinaryHolder::ArchiveEntry::KeyTy("/", {});
   }
 
   static unsigned

@@ -16,6 +16,7 @@
 #include "flang/Semantics/module-dependences.h"
 #include "flang/Support/Fortran.h"
 #include "llvm/ADT/DenseMapInfo.h"
+#include "llvm/Frontend/OpenMP/OMP.h"
 
 #include <array>
 #include <functional>
@@ -30,8 +31,7 @@ class raw_ostream;
 }
 namespace Fortran::parser {
 struct Expr;
-struct OpenMPDeclareReductionConstruct;
-struct OmpMetadirectiveDirective;
+struct OpenMPDeclarativeConstruct;
 }
 
 namespace Fortran::semantics {
@@ -51,32 +51,54 @@ using MutableSymbolVector = std::vector<MutableSymbolRef>;
 
 // Mixin for details with OpenMP declarative constructs.
 class WithOmpDeclarative {
-  using OmpAtomicOrderType = common::OmpMemoryOrderType;
-
 public:
-  ENUM_CLASS(RequiresFlag, ReverseOffload, UnifiedAddress, UnifiedSharedMemory,
-      DynamicAllocators);
-  using RequiresFlags = common::EnumSet<RequiresFlag, RequiresFlag_enumSize>;
+  using OmpClauseSet =
+      common::EnumSet<llvm::omp::Clause, llvm::omp::Clause_enumSize>;
 
-  bool has_ompRequires() const { return ompRequires_.has_value(); }
-  const RequiresFlags *ompRequires() const {
-    return ompRequires_ ? &*ompRequires_ : nullptr;
-  }
-  void set_ompRequires(RequiresFlags flags) { ompRequires_ = flags; }
+  const OmpClauseSet &ompRequires() const { return ompRequires_; }
+  void set_ompRequires(OmpClauseSet clauses) { ompRequires_ = clauses; }
 
-  bool has_ompAtomicDefaultMemOrder() const {
-    return ompAtomicDefaultMemOrder_.has_value();
+  const std::optional<common::OmpMemoryOrderType> &
+  ompAtomicDefaultMemOrder() const {
+    return ompAtomicDefaultMemOrder_;
   }
-  const OmpAtomicOrderType *ompAtomicDefaultMemOrder() const {
-    return ompAtomicDefaultMemOrder_ ? &*ompAtomicDefaultMemOrder_ : nullptr;
-  }
-  void set_ompAtomicDefaultMemOrder(OmpAtomicOrderType flags) {
+  void set_ompAtomicDefaultMemOrder(common::OmpMemoryOrderType flags) {
     ompAtomicDefaultMemOrder_ = flags;
   }
 
+  const OmpClauseSet &ompDeclTarget() const { return ompDeclTarget_; }
+  void set_ompDeclTarget(OmpClauseSet clauses) { ompDeclTarget_ = clauses; }
+
+  const std::optional<common::OmpDeviceType> &ompDeviceType() const {
+    return ompDeviceType_;
+  }
+  void set_ompDeclTarget(common::OmpDeviceType device) {
+    ompDeviceType_ = device;
+  }
+
+  void printClauseSet(llvm::raw_ostream &os, const OmpClauseSet &clauses,
+      parser::CharBlock name = parser::CharBlock{}) const;
+  friend llvm::raw_ostream &operator<<(
+      llvm::raw_ostream &, const WithOmpDeclarative &);
+
+  void set_version(unsigned version) { version_ = version; }
+
 private:
-  std::optional<RequiresFlags> ompRequires_;
-  std::optional<OmpAtomicOrderType> ompAtomicDefaultMemOrder_;
+  unsigned version_;
+  // The set of clauses from a REQUIRES directive. Only applicable
+  // to program unit symbols (i.e. scopes of the REQUIRES directive).
+  // The set of requirements for any program unit include requirements
+  // from any module used in the program unit.
+  OmpClauseSet ompRequires_;
+  // The argument to ATOMIC_DEFAULT_MEM_ORDER. Only needed when the ADMO
+  // clause is present in the ompRequires_ set.
+  std::optional<common::OmpMemoryOrderType> ompAtomicDefaultMemOrder_;
+  // The set of clauses on DECLARE_TARGET directive that apply to this
+  // symbol.
+  OmpClauseSet ompDeclTarget_;
+  // The argument to DEVICE_TYPE clause. Only needed when the clause is
+  // present in the ompDeclTarget_ set.
+  std::optional<common::OmpDeviceType> ompDeviceType_;
 };
 
 // A module or submodule.
@@ -375,7 +397,7 @@ private:
 llvm::raw_ostream &operator<<(llvm::raw_ostream &, const AssocEntityDetails &);
 
 // An entity known to be an object.
-class ObjectEntityDetails : public EntityDetails {
+class ObjectEntityDetails : public EntityDetails, public WithOmpDeclarative {
 public:
   explicit ObjectEntityDetails(EntityDetails &&);
   ObjectEntityDetails(const ObjectEntityDetails &) = default;
@@ -446,7 +468,9 @@ private:
 // A procedure pointer (other than one defined with POINTER and an
 // INTERFACE block), a dummy procedure (without an INTERFACE but with
 // EXTERNAL or use in a procedure reference), or external procedure.
-class ProcEntityDetails : public EntityDetails, public WithPassArg {
+class ProcEntityDetails : public EntityDetails,
+                          public WithPassArg,
+                          public WithOmpDeclarative {
 public:
   ProcEntityDetails() = default;
   explicit ProcEntityDetails(EntityDetails &&);
@@ -473,6 +497,12 @@ public:
     return usedAsProcedureHere_;
   }
   void set_usedAsProcedureHere(SourceName here) { usedAsProcedureHere_ = here; }
+  const std::vector<OpenACCRoutineInfo> &openACCRoutineInfos() const {
+    return openACCRoutineInfos_;
+  }
+  void add_openACCRoutineInfo(OpenACCRoutineInfo info) {
+    openACCRoutineInfos_.push_back(info);
+  }
 
 private:
   const Symbol *rawProcInterface_{nullptr};
@@ -480,6 +510,7 @@ private:
   std::optional<const Symbol *> init_;
   bool isCUDAKernel_{false};
   std::optional<SourceName> usedAsProcedureHere_;
+  std::vector<OpenACCRoutineInfo> openACCRoutineInfos_;
   friend llvm::raw_ostream &operator<<(
       llvm::raw_ostream &, const ProcEntityDetails &);
 };
@@ -511,6 +542,11 @@ public:
   const std::list<SourceName> &componentNames() const {
     return componentNames_;
   }
+  const std::map<SourceName, const parser::Expr *> &
+  originalKindParameterMap() const {
+    return originalKindParameterMap_;
+  }
+  void add_originalKindParameter(SourceName, const parser::Expr *);
 
   // If this derived type extends another, locate the parent component's symbol.
   const Symbol *GetParentComponent(const Scope &) const;
@@ -539,6 +575,8 @@ private:
   bool sequence_{false};
   bool isDECStructure_{false};
   bool isForwardReferenced_{false};
+  std::map<SourceName, const parser::Expr *> originalKindParameterMap_;
+
   friend llvm::raw_ostream &operator<<(
       llvm::raw_ostream &, const DerivedTypeDetails &);
 };
@@ -569,19 +607,23 @@ private:
   SymbolVector objects_;
 };
 
-class CommonBlockDetails : public WithBindName {
+class CommonBlockDetails : public WithBindName, public WithOmpDeclarative {
 public:
+  explicit CommonBlockDetails(SourceName location)
+      : sourceLocation_{location} {}
+  SourceName sourceLocation() const { return sourceLocation_; }
   MutableSymbolVector &objects() { return objects_; }
   const MutableSymbolVector &objects() const { return objects_; }
   void add_object(Symbol &object) { objects_.emplace_back(object); }
   void replace_object(Symbol &object, unsigned index) {
-    CHECK(index < (unsigned)objects_.size());
+    CHECK(index < objects_.size());
     objects_[index] = object;
   }
   std::size_t alignment() const { return alignment_; }
   void set_alignment(std::size_t alignment) { alignment_ = alignment; }
 
 private:
+  SourceName sourceLocation_;
   MutableSymbolVector objects_;
   std::size_t alignment_{0}; // required alignment in bytes
 };
@@ -736,9 +778,7 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &, const GenericDetails &);
 class UserReductionDetails {
 public:
   using TypeVector = std::vector<const DeclTypeSpec *>;
-  using DeclInfo = std::variant<const parser::OpenMPDeclareReductionConstruct *,
-      const parser::OmpMetadirectiveDirective *>;
-  using DeclVector = std::vector<DeclInfo>;
+  using DeclVector = std::vector<const parser::OpenMPDeclarativeConstruct *>;
 
   UserReductionDetails() = default;
 
@@ -753,14 +793,50 @@ public:
         return true;
       }
     }
+    // For derived and class-derived types, match on the type symbol pointer.
+    if (type.category() == DeclTypeSpec::TypeDerived ||
+        type.category() == DeclTypeSpec::ClassDerived) {
+      const auto &rhs = type.derivedTypeSpec();
+      const auto &rhsSym = rhs.typeSymbol();
+      for (auto t : typeList_) {
+        if (t->category() == DeclTypeSpec::TypeDerived ||
+            t->category() == DeclTypeSpec::ClassDerived) {
+          const auto &lhs = t->derivedTypeSpec();
+          const auto &lhsSym = lhs.typeSymbol();
+          if (&lhsSym == &rhsSym) {
+            return true;
+          }
+        }
+      }
+    }
     return false;
   }
 
-  void AddDecl(const DeclInfo &decl) { declList_.emplace_back(decl); }
+  void AddDecl(const parser::OpenMPDeclarativeConstruct *decl) {
+    declList_.emplace_back(decl);
+  }
   const DeclVector &GetDeclList() const { return declList_; }
 
 private:
   TypeVector typeList_;
+  DeclVector declList_;
+};
+
+// Used for OpenMP DECLARE MAPPER, it holds the declaration constructs
+// so they can be serialized into module files and later re-parsed when
+// USE-associated.
+class MapperDetails {
+public:
+  using DeclVector = std::vector<const parser::OpenMPDeclarativeConstruct *>;
+
+  MapperDetails() = default;
+
+  void AddDecl(const parser::OpenMPDeclarativeConstruct *decl) {
+    declList_.emplace_back(decl);
+  }
+  const DeclVector &GetDeclList() const { return declList_; }
+
+private:
   DeclVector declList_;
 };
 
@@ -771,7 +847,7 @@ using Details = std::variant<UnknownDetails, MainProgramDetails, ModuleDetails,
     ObjectEntityDetails, ProcEntityDetails, AssocEntityDetails,
     DerivedTypeDetails, UseDetails, UseErrorDetails, HostAssocDetails,
     GenericDetails, ProcBindingDetails, NamelistDetails, CommonBlockDetails,
-    TypeParamDetails, MiscDetails, UserReductionDetails>;
+    TypeParamDetails, MiscDetails, UserReductionDetails, MapperDetails>;
 llvm::raw_ostream &operator<<(llvm::raw_ostream &, const Details &);
 std::string DetailsToString(const Details &);
 
@@ -802,7 +878,7 @@ public:
       AccPrivate, AccFirstPrivate, AccShared,
       // OpenACC data-mapping attribute
       AccCopy, AccCopyIn, AccCopyInReadOnly, AccCopyOut, AccCreate, AccDelete,
-      AccPresent, AccLink, AccDeviceResident, AccDevicePtr,
+      AccPresent, AccLink, AccDeviceResident, AccDevicePtr, AccUseDevice,
       // OpenACC declare
       AccDeclare,
       // OpenACC data-movement attribute
@@ -811,12 +887,14 @@ public:
       AccCommonBlock, AccThreadPrivate, AccReduction, AccNone, AccPreDetermined,
       // OpenMP data-sharing attribute
       OmpShared, OmpPrivate, OmpLinear, OmpFirstPrivate, OmpLastPrivate,
+      OmpGroupPrivate,
       // OpenMP data-mapping attribute
-      OmpMapTo, OmpMapFrom, OmpMapToFrom, OmpMapAlloc, OmpMapRelease,
-      OmpMapDelete, OmpUseDevicePtr, OmpUseDeviceAddr, OmpIsDevicePtr,
-      OmpHasDeviceAddr,
+      OmpMapTo, OmpMapFrom, OmpMapToFrom, OmpMapStorage, OmpMapDelete,
+      OmpUseDevicePtr, OmpUseDeviceAddr, OmpIsDevicePtr, OmpHasDeviceAddr,
       // OpenMP data-copying attribute
       OmpCopyIn, OmpCopyPrivate,
+      // OpenMP special variables
+      OmpInVar, OmpOrigVar, OmpOutVar, OmpPrivVar,
       // OpenMP miscellaneous flags
       OmpCommonBlock, OmpReduction, OmpInReduction, OmpAligned, OmpNontemporal,
       OmpAllocate, OmpDeclarativeAllocateDirective,
@@ -1123,6 +1201,9 @@ inline const DeclTypeSpec *Symbol::GetTypeImpl(int depth) const {
           [&](const HostAssocDetails &x) {
             return x.symbol().GetTypeImpl(depth);
           },
+          [&](const GenericDetails &x) {
+            return x.specific() ? x.specific()->GetTypeImpl(depth) : nullptr;
+          },
           [](const auto &) -> const DeclTypeSpec * { return nullptr; },
       },
       details_);
@@ -1177,12 +1258,6 @@ namespace llvm {
 template <> struct DenseMapInfo<Fortran::semantics::SymbolRef> {
   static inline Fortran::semantics::SymbolRef getEmptyKey() {
     auto ptr = DenseMapInfo<const Fortran::semantics::Symbol *>::getEmptyKey();
-    return *reinterpret_cast<Fortran::semantics::SymbolRef *>(&ptr);
-  }
-
-  static inline Fortran::semantics::SymbolRef getTombstoneKey() {
-    auto ptr =
-        DenseMapInfo<const Fortran::semantics::Symbol *>::getTombstoneKey();
     return *reinterpret_cast<Fortran::semantics::SymbolRef *>(&ptr);
   }
 

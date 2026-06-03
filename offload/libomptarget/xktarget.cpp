@@ -20,9 +20,19 @@ TableMap *getTableMap(void *HostPtr);
 // omp target //
 ////////////////
 
+struct UpgradedArgBuffersTy {
+  llvm::SmallVector<void *, 0> BasePtrs;
+  llvm::SmallVector<void *, 0> Ptrs;
+  llvm::SmallVector<int64_t, 0> Sizes;
+  llvm::SmallVector<int64_t, 0> Types;
+  llvm::SmallVector<map_var_info_t, 0> Names;
+  llvm::SmallVector<void *, 0> Mappers;
+};
+
 KernelArgsTy * upgradeKernelArgs(
-    KernelArgsTy *KernelArgs,
-    KernelArgsTy &LocalKernelArgs,
+    KernelArgsTy * KernelArgs,
+    KernelArgsTy & LocalKernelArgs,
+    UpgradedArgBuffersTy & Bufs,
     int32_t NumTeams,
     int32_t ThreadLimit
 );
@@ -94,12 +104,13 @@ __xktgt_target_kernel_launch(
     bool IsTeams = NumTeams != -1;
     if (!IsTeams)
     {
-        KernelArgs->NumTeams[0] = NumTeams = 1;
+        KernelArgs->UserNumBlocks[0] = NumTeams = 1;
     }
 
     // 'KernelArgs' will point to 'LocalKernelArgs' if it becomes upgraded, else it remains unchanged
     KernelArgsTy LocalKernelArgs;
-    KernelArgs = upgradeKernelArgs(KernelArgs, LocalKernelArgs, NumTeams, ThreadLimit);
+    UpgradedArgBuffersTy UpgradedBufs;
+    KernelArgs = upgradeKernelArgs(KernelArgs, LocalKernelArgs, UpgradedBufs, NumTeams, ThreadLimit);
 
     GenericPluginTy * GenericPlugin = Device.RTL;
     assert(GenericPlugin);
@@ -181,17 +192,17 @@ __xktgt_target_kernel_launch(
     assert(KernelLaunchEnvironment);
 
     // prepareArgs
-    KernelLaunchParamsTy LaunchParams = GenericKernel.prepareArgs(GenericDevice, ArgPtrs, ArgOffsets, KernelArgs->NumArgs, Args, Ptrs, KernelLaunchEnvironment);
+    KernelLaunchParamsTy LaunchParams = GenericKernel.prepareArgs(GenericDevice, ArgPtrs, ArgOffsets, KernelArgs->NumArgs, Args, Ptrs, KernelLaunchEnvironment, KernelArgs->Version);
 
     // shared memory for cuda
     // const unsigned int sharedmemory = KernelArgs->DynCGroupMem;
 
-    uint32_t NumThreads[3] = {KernelArgs->ThreadLimit[0], KernelArgs->ThreadLimit[1], KernelArgs->ThreadLimit[2]};
-    uint32_t NumBlocks[3] = {KernelArgs->NumTeams[0], KernelArgs->NumTeams[1], KernelArgs->NumTeams[2]};
+    uint32_t NumThreads[3] = {KernelArgs->UserThreadLimit[0], KernelArgs->UserThreadLimit[1], KernelArgs->UserThreadLimit[2]};
+    uint32_t NumBlocks[3] = {KernelArgs->UserNumBlocks[0], KernelArgs->UserNumBlocks[1], KernelArgs->UserNumBlocks[2]};
     if (!GenericKernel.isBareMode())
     {
-        NumThreads[0] = GenericKernel.getNumThreads(GenericDevice, NumThreads);
-        NumBlocks[0]  = GenericKernel.getNumBlocks(GenericDevice, NumBlocks, KernelArgs->Tripcount, NumThreads[0], KernelArgs->ThreadLimit[0] > 0);
+        NumThreads[0] = GenericKernel.getEffectiveNumThreads(GenericDevice, NumThreads[0]);
+        NumBlocks[0]  = GenericKernel.getEffectiveNumBlocks(GenericDevice, NumBlocks[0], KernelArgs->Tripcount, NumThreads[0], KernelArgs->UserThreadLimit[0] > 0);
     }
 
     // launch the kernel
@@ -227,8 +238,6 @@ __xktgt_target_kernel_launch(
     if (nowait)
     {
         // gotta dupplicate heap-allocated args, and free on command completion
-        constexpr command_flag_t flags = COMMAND_FLAG_NONE;
-
         const auto builder_nowait = [&] (command_t * command)
         {
             // construct command
@@ -335,15 +344,23 @@ __xktgt_target_data_update_nowait_mapper(
             LOGGER_FATAL("Custom mapper not supported");
 
         // only support continuous transfer for now
-        assert(!(ArgTypes[i] & OMP_TGT_MAPTYPE_NON_CONTIG));
+        if (ArgTypes[i] & OMP_TGT_MAPTYPE_NON_CONTIG)
+            LOGGER_FATAL("Non-contiguous transfer not supported");
 
         // launch command
         void * HstPtrBegin = Args[i];
         int64_t ArgSize = ArgSizes[i];
         int64_t ArgType = ArgTypes[i];
 
+        # if 0
+        void * HstPtrBase  = ArgsBase[i];
+        int64_t offset = ((int64_t) HstPtrBegin - (int64_t) HstPtrBase);
+        TargetPointerResultTy TPR = Device.getMappingInfo().getTgtPtrBegin(HstPtrBase, ArgSize, /*UpdateRefCount=*/false, /*UseHoldRefCount=*/false, /*MustContain=*/true);
+        void * TgtPtrBegin = (void *) ((uintptr_t)TPR.TargetPointer + offset);
+        # else
         TargetPointerResultTy TPR = Device.getMappingInfo().getTgtPtrBegin(HstPtrBegin, ArgSize, /*UpdateRefCount=*/false, /*UseHoldRefCount=*/false, /*MustContain=*/true);
         void * TgtPtrBegin = TPR.TargetPointer;
+        # endif
 
         if (!TPR.isPresent()) {
             // Match vanilla LLVM behavior (omptarget.cpp targetDataContiguous):

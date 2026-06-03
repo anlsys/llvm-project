@@ -1,5 +1,5 @@
 ; RUN: opt < %s -passes=loop-interchange -cache-line-size=64 \
-; RUN:     -pass-remarks-output=%t -disable-output
+; RUN:     -pass-remarks-output=%t -disable-output -loop-interchange-profitabilities=instorder
 ; RUN: FileCheck -input-file %t --check-prefix=PROFIT-CACHE %s
 
 ; RUN: opt < %s -passes=loop-interchange -cache-line-size=64 \
@@ -27,7 +27,7 @@
 ; PROFIT-CACHE-NEXT: Name:            InterchangeNotProfitable
 ; PROFIT-CACHE-NEXT: Function:        f
 ; PROFIT-CACHE-NEXT: Args:
-; PROFIT-CACHE-NEXT:   - String:          Interchanging loops is not considered to improve cache locality nor vectorization.
+; PROFIT-CACHE-NEXT:   - String:          Insufficient information to calculate the cost of loop for interchange.
 ; PROFIT-CACHE-NEXT: ...
 
 ; PROFIT-VEC:      --- !Passed
@@ -65,7 +65,7 @@ for.j.body:
   %add.2 = fadd float %add.1, %d
   %add.3 = fadd float %add.2, %e
   %add.4 = fadd float %add.3, %f
-  %a.1.index = getelementptr nuw inbounds [256 x [256 x float]], ptr @A, i64 %j, i64 %i
+  %a.1.index = getelementptr nuw inbounds [256 x float], ptr @A, i64 %j, i64 %i
   store float %add.4, ptr %a.1.index, align 4
   %j.next = add nuw nsw i64 %j, 1
   %cmp.j = icmp eq i64 %j.next, 256

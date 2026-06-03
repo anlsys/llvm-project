@@ -35,7 +35,7 @@ struct ExplicitSpec_NotImported {};
 #define USEMEMFUNC(class, func) void (class::*UNIQ(use)())() { return &class::func; }
 #define USESTATICMEMFUNC(class, func) void (*UNIQ(use)())() { return &class::func; }
 #define USECLASS(class) void UNIQ(USE)() { class x; }
-#define USECOPYASSIGN(class) class& (class::*UNIQ(use)())(class&) { return &class::operator=; }
+#define USECOPYASSIGN(class) class& (class::*UNIQ(use)())(const class&) { return &class::operator=; }
 #define USEMOVEASSIGN(class) class& (class::*UNIQ(use)())(class&&) { return &class::operator=; }
 
 //===----------------------------------------------------------------------===//
@@ -649,13 +649,15 @@ struct __declspec(dllimport) T {
   static int b;
   // MO1-DAG: @"?b@T@@2HA" = external dllimport global i32
 
-  T& operator=(T&) = default;
-  // MO1-DAG: define available_externally dllimport x86_thiscallcc nonnull align {{[0-9]+}} dereferenceable({{[0-9]+}}) ptr @"??4T@@QAEAAU0@AAU0@@Z"
+  T& operator=(const T&) = default;
+  // MO1-DAG: define available_externally dllimport x86_thiscallcc nonnull align {{[0-9]+}} dereferenceable({{[0-9]+}}) ptr @"??4T@@QAEAAU0@ABU0@@Z"
+  // PS-DAG: declare dllimport nonnull align {{[0-9]+}} dereferenceable({{[0-9]+}}) ptr @_ZN1TaSERKS_
 
   T& operator=(T&&) = default;
-  // Note: Don't mark inline move operators dllimport because current MSVC versions don't export them.
+  // Note: Don't mark inline move operators dllimport because MSVC versions before 2015 don't export them.
   // M18-DAG: define linkonce_odr dso_local x86_thiscallcc nonnull align {{[0-9]+}} dereferenceable({{[0-9]+}}) ptr @"??4T@@QAEAAU0@$$QAU0@@Z"
   // M19-DAG: define available_externally dllimport x86_thiscallcc nonnull align {{[0-9]+}} dereferenceable({{[0-9]+}}) ptr @"??4T@@QAEAAU0@$$QAU0@@Z"
+  // PS-DAG: declare dllimport nonnull align {{[0-9]+}} dereferenceable({{[0-9]+}}) ptr @_ZN1TaSEOS_
 };
 USEMEMFUNC(T, a)
 USESTATICMEMFUNC(T, StaticMethod)
@@ -671,16 +673,16 @@ USEMEMFUNC(V, foo)
 struct __declspec(dllimport) W { virtual void foo() {} };
 USECLASS(W)
 // vftable:
-// MO1-DAG: @"??_SW@@6B@" = linkonce_odr unnamed_addr constant { [1 x ptr] } { [1 x ptr] [ptr @"?foo@W@@UAEXXZ"] }
-// GO1-DAG: @_ZTV1W = available_externally dllimport unnamed_addr constant { [3 x ptr] } { [3 x ptr] [ptr null, ptr null, ptr @_ZN1W3fooEv] }
+// MO1-DAG: @"??_SW@@6B@" = linkonce_odr constant { [1 x ptr] } { [1 x ptr] [ptr @"?foo@W@@UAEXXZ"] }
+// GO1-DAG: @_ZTV1W = available_externally dllimport constant { [3 x ptr] } { [3 x ptr] [ptr null, ptr null, ptr @_ZN1W3fooEv] }
 
 struct __declspec(dllimport) KeyFuncClass {
   constexpr KeyFuncClass() {}
   virtual void foo();
 };
 extern constexpr KeyFuncClass keyFuncClassVar = {};
-// G32-DAG: @_ZTV12KeyFuncClass = external dllimport unnamed_addr constant { [3 x ptr] }
-// C32-DAG: @_ZTV12KeyFuncClass = external dllimport unnamed_addr constant { [3 x ptr] }
+// G32-DAG: @_ZTV12KeyFuncClass = external dllimport constant { [3 x ptr] }
+// C32-DAG: @_ZTV12KeyFuncClass = external dllimport constant { [3 x ptr] }
 
 struct __declspec(dllimport) X : public virtual W {};
 USECLASS(X)
@@ -786,7 +788,7 @@ namespace PR21355 {
   // S::~S is a key function, so we would ordinarily emit a strong definition for
   // the vtable. However, S is imported, so the vtable should be too.
 
-  // GNU-DAG: @_ZTVN7PR213551SE = available_externally dllimport unnamed_addr constant { [4 x ptr] }
+  // GNU-DAG: @_ZTVN7PR213551SE = available_externally dllimport constant { [4 x ptr] }
 }
 
 namespace PR21366 {
@@ -808,7 +810,7 @@ namespace PR27319 {
   };
   extern template struct __declspec(dllimport) A<int>;
   void f() { new A<int>(); }
-  // MO1-DAG: @"??_S?$A@H@PR27319@@6B@" = linkonce_odr unnamed_addr constant { [1 x ptr] }
+  // MO1-DAG: @"??_S?$A@H@PR27319@@6B@" = linkonce_odr constant { [1 x ptr] }
 }
 
 // MS ignores DLL attributes on partial specializations.

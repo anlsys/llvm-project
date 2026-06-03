@@ -123,6 +123,20 @@ bool MemoryCache::RemoveInvalidRange(lldb::addr_t base_addr,
   return false;
 }
 
+const uint8_t *MemoryCache::FindL1CacheEntry(lldb::addr_t addr,
+                                             size_t len) const {
+  if (m_L1_cache.empty())
+    return nullptr;
+  AddrRange read_range(addr, len);
+  BlockMap::const_iterator pos = m_L1_cache.upper_bound(addr);
+  if (pos != m_L1_cache.begin())
+    --pos;
+  AddrRange chunk_range(pos->first, pos->second->GetByteSize());
+  if (!chunk_range.Contains(read_range))
+    return nullptr;
+  return pos->second->GetBytes() + (addr - chunk_range.GetRangeBase());
+}
+
 lldb::DataBufferSP MemoryCache::GetL2CacheLine(lldb::addr_t line_base_addr,
                                                Status &error) {
   // This function assumes that the address given is aligned correctly.
@@ -173,18 +187,9 @@ size_t MemoryCache::Read(addr_t addr, void *dst, size_t dst_len,
   // L1 cache contains chunks of memory that are not required to be the size of
   // an L2 cache line. We avoid trying to do partial reads from the L1 cache to
   // simplify the implementation.
-  if (!m_L1_cache.empty()) {
-    AddrRange read_range(addr, dst_len);
-    BlockMap::iterator pos = m_L1_cache.upper_bound(addr);
-    if (pos != m_L1_cache.begin()) {
-      --pos;
-    }
-    AddrRange chunk_range(pos->first, pos->second->GetByteSize());
-    if (chunk_range.Contains(read_range)) {
-      memcpy(dst, pos->second->GetBytes() + (addr - chunk_range.GetRangeBase()),
-             dst_len);
-      return dst_len;
-    }
+  if (const uint8_t *l1_data = FindL1CacheEntry(addr, dst_len)) {
+    memcpy(dst, l1_data, dst_len);
+    return dst_len;
   }
 
   // If the size of the read is greater than the size of an L2 cache line, we'll
@@ -318,13 +323,14 @@ lldb::addr_t AllocatedBlock::ReserveBlock(uint32_t size) {
         free_block.SetRangeBase(reserved_block.GetRangeEnd());
         free_block.SetByteSize(bytes_left);
       }
-      LLDB_LOGV(log, "({0}) (size = {1} ({1:x})) => {2:x}", this, size, addr);
+      LLDB_LOG_VERBOSE(log, "({0}) (size = {1} ({1:x})) => {2:x}", this, size,
+                       addr);
       return addr;
     }
   }
 
-  LLDB_LOGV(log, "({0}) (size = {1} ({1:x})) => {2:x}", this, size,
-            LLDB_INVALID_ADDRESS);
+  LLDB_LOG_VERBOSE(log, "({0}) (size = {1} ({1:x})) => {2:x}", this, size,
+                   LLDB_INVALID_ADDRESS);
   return LLDB_INVALID_ADDRESS;
 }
 
@@ -338,7 +344,7 @@ bool AllocatedBlock::FreeBlock(addr_t addr) {
     success = true;
   }
   Log *log = GetLog(LLDBLog::Process);
-  LLDB_LOGV(log, "({0}) (addr = {1:x}) => {2}", this, addr, success);
+  LLDB_LOG_VERBOSE(log, "({0}) (addr = {1:x}) => {2}", this, addr, success);
   return success;
 }
 
@@ -368,13 +374,11 @@ AllocatedMemoryCache::AllocatePage(uint32_t byte_size, uint32_t permissions,
   addr_t addr = m_process.DoAllocateMemory(page_byte_size, permissions, error);
 
   Log *log = GetLog(LLDBLog::Process);
-  if (log) {
-    LLDB_LOGF(log,
-              "Process::DoAllocateMemory (byte_size = 0x%8.8" PRIx32
-              ", permissions = %s) => 0x%16.16" PRIx64,
-              (uint32_t)page_byte_size, GetPermissionsAsCString(permissions),
-              (uint64_t)addr);
-  }
+  LLDB_LOGF(log,
+            "Process::DoAllocateMemory (byte_size = 0x%8.8" PRIx32
+            ", permissions = %s) => 0x%16.16" PRIx64,
+            (uint32_t)page_byte_size, GetPermissionsAsCString(permissions),
+            (uint64_t)addr);
 
   if (addr != LLDB_INVALID_ADDRESS) {
     block_sp = std::make_shared<AllocatedBlock>(addr, page_byte_size,

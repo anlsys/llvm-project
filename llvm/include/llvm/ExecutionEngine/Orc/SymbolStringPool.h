@@ -14,6 +14,7 @@
 #define LLVM_EXECUTIONENGINE_ORC_SYMBOLSTRINGPOOL_H
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/Compiler.h"
 #include <atomic>
@@ -71,6 +72,7 @@ private:
 /// from nullptr to enable comparison with these values.
 class SymbolStringPtrBase {
   friend class SymbolStringPool;
+  friend class SymbolStringPoolEntryUnsafe;
   friend struct DenseMapInfo<SymbolStringPtr>;
   friend struct DenseMapInfo<NonOwningSymbolStringPtr>;
 
@@ -204,7 +206,7 @@ public:
   SymbolStringPoolEntryUnsafe(PoolEntry *E) : E(E) {}
 
   /// Create an unsafe pool entry ref without changing the ref-count.
-  static SymbolStringPoolEntryUnsafe from(const SymbolStringPtr &S) {
+  static SymbolStringPoolEntryUnsafe from(const SymbolStringPtrBase &S) {
     return S.S;
   }
 
@@ -318,6 +320,10 @@ SymbolStringPool::getRefCount(const SymbolStringPtrBase &S) const {
 LLVM_ABI raw_ostream &operator<<(raw_ostream &OS,
                                  const SymbolStringPtrBase &Sym);
 
+inline hash_code hash_value(const orc::SymbolStringPtrBase &S) {
+  return hash_value(orc::SymbolStringPoolEntryUnsafe::from(S).rawPtr());
+}
+
 } // end namespace orc
 
 template <>
@@ -325,10 +331,6 @@ struct DenseMapInfo<orc::SymbolStringPtr> {
 
   static orc::SymbolStringPtr getEmptyKey() {
     return orc::SymbolStringPtr::getEmptyVal();
-  }
-
-  static orc::SymbolStringPtr getTombstoneKey() {
-    return orc::SymbolStringPtr::getTombstoneVal();
   }
 
   static unsigned getHashValue(const orc::SymbolStringPtrBase &V) {
@@ -345,10 +347,6 @@ template <> struct DenseMapInfo<orc::NonOwningSymbolStringPtr> {
 
   static orc::NonOwningSymbolStringPtr getEmptyKey() {
     return orc::NonOwningSymbolStringPtr::getEmptyVal();
-  }
-
-  static orc::NonOwningSymbolStringPtr getTombstoneKey() {
-    return orc::NonOwningSymbolStringPtr::getTombstoneVal();
   }
 
   static unsigned getHashValue(const orc::SymbolStringPtrBase &V) {

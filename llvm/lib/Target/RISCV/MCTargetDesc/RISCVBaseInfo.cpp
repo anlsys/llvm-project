@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "RISCVBaseInfo.h"
+#include "RISCVInstrInfo.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSubtargetInfo.h"
@@ -52,15 +53,6 @@ namespace RISCV {
 #include "RISCVGenSearchableTables.inc"
 } // namespace RISCV
 
-// Report an error but don't ask the user to report a bug.
-// TODO: Remove these wrappers.
-[[noreturn]] static void reportError(const char *Reason) {
-  reportFatalUsageError(Reason);
-}
-[[noreturn]] static void reportError(Error Err) {
-  reportFatalUsageError(std::move(Err));
-}
-
 namespace RISCVABI {
 ABI computeTargetABI(const Triple &TT, const FeatureBitset &FeatureBits,
                      StringRef ABIName) {
@@ -97,7 +89,7 @@ ABI computeTargetABI(const Triple &TT, const FeatureBitset &FeatureBits,
   if ((TargetABI == RISCVABI::ABI::ABI_ILP32E ||
        (TargetABI == ABI_Unknown && IsRVE && !IsRV64)) &&
       FeatureBits[RISCV::FeatureStdExtD])
-    reportError("ILP32E cannot be used with the D ISA extension");
+    reportFatalUsageError("ILP32E cannot be used with the D ISA extension");
 
   if (TargetABI != ABI_Unknown)
     return TargetABI;
@@ -105,7 +97,7 @@ ABI computeTargetABI(const Triple &TT, const FeatureBitset &FeatureBits,
   // If no explicit ABI is given, try to compute the default ABI.
   auto ISAInfo = RISCVFeatures::parseFeatureBits(IsRV64, FeatureBits);
   if (!ISAInfo)
-    reportError(ISAInfo.takeError());
+    reportFatalUsageError(ISAInfo.takeError());
   return getTargetABI((*ISAInfo)->computeDefaultABI());
 }
 
@@ -115,10 +107,17 @@ ABI getTargetABI(StringRef ABIName) {
                        .Case("ilp32f", ABI_ILP32F)
                        .Case("ilp32d", ABI_ILP32D)
                        .Case("ilp32e", ABI_ILP32E)
+                       .Case("il32pc64", ABI_IL32PC64)
+                       .Case("il32pc64f", ABI_IL32PC64F)
+                       .Case("il32pc64d", ABI_IL32PC64D)
+                       .Case("il32pc64e", ABI_IL32PC64E)
                        .Case("lp64", ABI_LP64)
                        .Case("lp64f", ABI_LP64F)
                        .Case("lp64d", ABI_LP64D)
                        .Case("lp64e", ABI_LP64E)
+                       .Case("l64pc128", ABI_L64PC128)
+                       .Case("l64pc128f", ABI_L64PC128F)
+                       .Case("l64pc128d", ABI_L64PC128D)
                        .Default(ABI_Unknown);
   return TargetABI;
 }
@@ -137,12 +136,12 @@ namespace RISCVFeatures {
 
 void validate(const Triple &TT, const FeatureBitset &FeatureBits) {
   if (TT.isArch64Bit() && !FeatureBits[RISCV::Feature64Bit])
-    reportError("RV64 target requires an RV64 CPU");
+    reportFatalUsageError("RV64 target requires an RV64 CPU");
   if (!TT.isArch64Bit() && !FeatureBits[RISCV::Feature32Bit])
-    reportError("RV32 target requires an RV32 CPU");
+    reportFatalUsageError("RV32 target requires an RV32 CPU");
   if (FeatureBits[RISCV::Feature32Bit] &&
       FeatureBits[RISCV::Feature64Bit])
-    reportError("RV32 and RV64 can't be combined");
+    reportFatalUsageError("RV32 and RV64 can't be combined");
 }
 
 llvm::Expected<std::unique_ptr<RISCVISAInfo>>
