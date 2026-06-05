@@ -12539,6 +12539,10 @@ def err_omp_linear_distribute_var_non_loop_iteration : Error<
 def warn_omp_non_trivial_type_mapped : Warning<
   "type %0 is not trivially copyable and not guaranteed to be mapped correctly">,
   InGroup<OpenMPMapping>;
+def warn_omp_variable_not_mapped_or_accessed : Warning<
+  "variable %0 is used in the target region but not specified in a 'map' or "
+  "'access' clause; variable will be implicitly mapped">,
+  InGroup<OpenMPMapping>;
 def err_omp_requires_clause_redeclaration : Error <
   "only one %0 clause can appear on a requires directive in a single translation unit">;
 def note_omp_requires_previous_clause : Note <

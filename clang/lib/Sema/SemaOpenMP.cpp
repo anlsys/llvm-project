@@ -6411,6 +6411,40 @@ StmtResult SemaOpenMP::ActOnOpenMPExecutableDirective(
           ClausesWithImplicit.emplace_back(Implicit);
       }
     }
+    // Warn about variables used in target regions that are not in any
+    // explicit 'map' or 'access' clause (they will be implicitly mapped).
+    if (isOpenMPTargetExecutionDirective(Kind)) {
+      // Collect base declarations from access clauses.
+      llvm::SmallDenseSet<const ValueDecl *, 8> AccessedVars;
+      for (OMPClause *C : Clauses) {
+        if (auto *AC = dyn_cast<OMPAccessClause>(C)) {
+          for (Expr *E : AC->varlist()) {
+            Expr *Base = E->IgnoreParenImpCasts();
+            while (auto *ASE = dyn_cast<ArraySectionExpr>(Base))
+              Base = ASE->getBase()->IgnoreParenImpCasts();
+            while (auto *ASE = dyn_cast<ArraySubscriptExpr>(Base))
+              Base = ASE->getBase()->IgnoreParenImpCasts();
+            if (auto *DRE = dyn_cast<DeclRefExpr>(Base))
+              AccessedVars.insert(DRE->getDecl()->getCanonicalDecl());
+          }
+        }
+      }
+      // Warn for each implicitly mapped variable not in an access clause.
+      for (unsigned I = 0; I < VariableImplicitInfo::DefaultmapKindNum; ++I) {
+        for (unsigned J = 0; J < VariableImplicitInfo::MapKindNum; ++J) {
+          for (Expr *E : ImpInfo.Mappings[I][J]) {
+            if (auto *DRE = dyn_cast<DeclRefExpr>(E->IgnoreParenImpCasts())) {
+              const ValueDecl *VD = DRE->getDecl()->getCanonicalDecl();
+              if (!AccessedVars.count(VD)) {
+                Diag(E->getExprLoc(),
+                     diag::warn_omp_variable_not_mapped_or_accessed)
+                    << VD;
+              }
+            }
+          }
+        }
+      }
+    }
     for (unsigned I = 0; I < VariableImplicitInfo::DefaultmapKindNum; ++I) {
       int ClauseKindCnt = -1;
       for (unsigned J = 0; J < VariableImplicitInfo::MapKindNum; ++J) {
