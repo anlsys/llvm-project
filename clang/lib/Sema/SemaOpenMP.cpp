@@ -6425,7 +6425,8 @@ StmtResult SemaOpenMP::ActOnOpenMPExecutableDirective(
             while (auto *ASE = dyn_cast<ArraySubscriptExpr>(Base))
               Base = ASE->getBase()->IgnoreParenImpCasts();
             if (auto *DRE = dyn_cast<DeclRefExpr>(Base))
-              AccessedVars.insert(DRE->getDecl()->getCanonicalDecl());
+              AccessedVars.insert(
+                  cast<ValueDecl>(DRE->getDecl()->getCanonicalDecl()));
           }
         }
       }
@@ -6434,7 +6435,8 @@ StmtResult SemaOpenMP::ActOnOpenMPExecutableDirective(
         for (unsigned J = 0; J < VariableImplicitInfo::MapKindNum; ++J) {
           for (Expr *E : ImpInfo.Mappings[I][J]) {
             if (auto *DRE = dyn_cast<DeclRefExpr>(E->IgnoreParenImpCasts())) {
-              const ValueDecl *VD = DRE->getDecl()->getCanonicalDecl();
+              const ValueDecl *VD =
+                  cast<ValueDecl>(DRE->getDecl()->getCanonicalDecl());
               if (!AccessedVars.count(VD)) {
                 Diag(E->getExprLoc(),
                      diag::warn_omp_variable_not_mapped_or_accessed)
