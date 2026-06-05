@@ -11066,6 +11066,21 @@ static void genMapInfoForAccessClauses(
         if (EntryVD->getCanonicalDecl() == CanonDecl) {
           CombinedInfo.Types[I] |=
               OpenMPOffloadMappingFlags::OMP_MAP_ACCESS;
+
+          // For array sections (e.g., v[-1:n+2]), update Pointers[I] to be
+          // the section start address and Sizes[I] to be the section size.
+          // BasePointers[I] remains the base pointer (v), so the runtime can
+          // compute TgtBaseOffset = HstPtrBase - HstPtrBegin to adjust the
+          // device pointer returned by xkomp_access_pointer.
+          if (const auto *ASE = dyn_cast<ArraySectionExpr>(
+                  E->IgnoreParenImpCasts())) {
+            llvm::Value *SectionAddr;
+            llvm::Value *SectionSize;
+            std::tie(SectionAddr, SectionSize) = getPointerAndSize(CGF, E);
+            CombinedInfo.Pointers[I] = SectionAddr;
+            CombinedInfo.Sizes[I] = SectionSize;
+          }
+
           Found = true;
           break;
         }

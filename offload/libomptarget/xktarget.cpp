@@ -147,8 +147,11 @@ __xktgt_target_kernel_launch(
         {
             // Access clause entry: resolve via xkomp_access_pointer(idx)
             // instead of the standard host-to-device mapping lookup.
+            // Compute offset between base pointer and section start so the
+            // kernel receives the correct base pointer (e.g., for v[-1:n+2],
+            // xkomp returns &dev_v[-1], offset adjusts it back to dev_v).
             TgtPtrBegin = xkomp_access_pointer(AccessIdx++);
-            TgtBaseOffset = 0;
+            TgtBaseOffset = (intptr_t)HstPtrBase - (intptr_t)HstPtrBegin;
         }
         else if (KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_LITERAL)
         {

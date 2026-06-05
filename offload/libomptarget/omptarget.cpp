@@ -2138,7 +2138,7 @@ int processDataBefore(ident_t *Loc, int64_t DeviceId, void *HostPtr,
       // Access clause entry: resolve via xkomp_access_pointer(idx) instead
       // of the standard host-to-device mapping lookup.
       TgtPtrBegin = xkomp_access_pointer(AccessIdx++);
-      TgtBaseOffset = 0;
+      TgtBaseOffset = (intptr_t)HstPtrBase - (intptr_t)HstPtrBegin;
     } else if (ArgTypes[I] & OMP_TGT_MAPTYPE_LITERAL) {
         ODBG(ODT_Mapping) << "Forwarding first-private value " << HstPtrBase
             << " to the target construct";
