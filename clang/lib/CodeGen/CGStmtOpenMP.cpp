@@ -5705,8 +5705,8 @@ void CodeGenFunction::EmitOMPTargetTaskBasedDirective(
 
       // Walk captures in order and collect access entries in capture order.
       SmallVector<FlatAccess, 8> Reordered;
-      for (auto CI = TargetCS->capture_begin(), CE = TargetCS->capture_end();
-           CI != CE; ++CI) {
+      for (CapturedStmt::const_capture_iterator CI = TargetCS->capture_begin(),
+                                      CE = TargetCS->capture_end(); CI != CE; ++CI) {
         if (CI->capturesVariableArrayType() || CI->capturesThis())
           continue;
         const Decl *CanonDecl = CI->getCapturedVar()->getCanonicalDecl();
