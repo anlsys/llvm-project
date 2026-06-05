@@ -110,7 +110,7 @@ struct CUDAKernelTy : public GenericKernelTy {
     if (auto Err = Plugin::check(Res, "error in cuModuleGetFunction('%s'): %s",
                                  getName()))
       return Err;
-    Func = CuFunc;
+    this->Func = CuFunc;    // set Func of the base class Generic, the CUDAKernelTy other value got removed by XKOMP
 
     // Check that the function pointer is valid.
     if (!CuFunc)
@@ -128,7 +128,7 @@ struct CUDAKernelTy : public GenericKernelTy {
 
     int SharedMemSize;
     Res = cuFuncGetAttribute(&SharedMemSize,
-                             CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, Func);
+                             CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, CuFunc);
     if (auto Err = Plugin::check(Res, "Error in cuFuncGetAttribute: %s"))
       return Err;
 
@@ -151,7 +151,7 @@ struct CUDAKernelTy : public GenericKernelTy {
     int MinGridSize;
     int MaxBlockSize;
     auto Res = cuOccupancyMaxPotentialBlockSize(
-        &MinGridSize, &MaxBlockSize, Func, NULL, DynamicMemSize, INT_MAX);
+        &MinGridSize, &MaxBlockSize, (CUfunction) this->Func, NULL, DynamicMemSize, INT_MAX);
     if (auto Err = Plugin::check(
             Res, "error in cuOccupancyMaxPotentialBlockSize: %s")) {
       return Err;
@@ -175,7 +175,7 @@ private:
     ArgsSize = 0;
 
     // Find the last argument to know the total size of the arguments.
-    while ((Res = cuFuncGetParamInfo(Func, Arg++, &ArgOffset, &ArgSize)) ==
+    while ((Res = cuFuncGetParamInfo((CUfunction) this->Func, Arg++, &ArgOffset, &ArgSize)) ==
            CUDA_SUCCESS)
       ArgsSize = ArgOffset + ArgSize;
 
@@ -184,8 +184,10 @@ private:
     return Plugin::success();
   }
 
+  # if 0
   /// The CUDA kernel function to execute.
   CUfunction Func;
+  # endif
 
   /// The maximum amount of dynamic shared memory per thread group. By default,
   /// this is set to 48 KB.
@@ -1505,7 +1507,7 @@ Error CUDAKernelTy::launchImpl(GenericDeviceTy &GenericDevice,
   // In case we require more memory than the current limit.
   if (DynBlockMemSize >= MaxDynBlockMemSize) {
     CUresult AttrResult = cuFuncSetAttribute(
-        Func, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, DynBlockMemSize);
+        (CUfunction) this->Func, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, DynBlockMemSize);
     if (auto Err = Plugin::check(
             AttrResult,
             "error in cuFuncSetAttribute while setting the memory limits: %s"))
@@ -1523,7 +1525,7 @@ Error CUDAKernelTy::launchImpl(GenericDeviceTy &GenericDevice,
                                  DynBlockMemSize, Stream,
                                  &CoopAttr,       1};
 
-  CUresult Res = cuLaunchKernelEx(&LaunchConfig, Func, KernelParams,
+  CUresult Res = cuLaunchKernelEx(&LaunchConfig, (CUfunction) this->Func, KernelParams,
                                   KernelParams ? nullptr : Config);
 
   // Register a callback to indicate when the kernel is complete.
@@ -1561,7 +1563,7 @@ CUDAKernelTy::getMaxCooperativeGroupCount(GenericDeviceTy &GenericDevice,
   // Query max active blocks per multiprocessor
   int32_t MaxNumActiveGroupsPerCU = 0;
   CUresult Res = cuOccupancyMaxActiveBlocksPerMultiprocessor(
-      &MaxNumActiveGroupsPerCU, Func, LocalWorkSizeTotal, DynBlockMemSize);
+      &MaxNumActiveGroupsPerCU, (CUfunction) this->Func, LocalWorkSizeTotal, DynBlockMemSize);
   if (auto Err = Plugin::check(
           Res, "error in cuOccupancyMaxActiveBlocksPerMultiprocessor: %s"))
     return Err;
