@@ -3723,12 +3723,30 @@ getPointerAndSize(CodeGenFunction &CGF, const Expr *E) {
     }
   } else if (const auto *ASE =
                  dyn_cast<ArraySectionExpr>(E->IgnoreParenImpCasts())) {
-    LValue UpAddrLVal = CGF.EmitArraySectionExpr(ASE, /*IsLowerBound=*/false);
-    Address UpAddrAddress = UpAddrLVal.getAddress();
-    llvm::Value *UpAddr = CGF.Builder.CreateConstGEP1_32(
-        UpAddrAddress.getElementType(), UpAddrAddress.emitRawPointer(CGF),
-        /*Idx0=*/1);
-    SizeVal = CGF.Builder.CreatePtrDiff(UpAddr, Addr, "", /*IsNUW=*/false);
+    // Compute size as Length * sizeof(element) directly, avoiding pointer
+    // arithmetic issues with negative lower bounds.
+    QualType BaseTy = ArraySectionExpr::getBaseOriginalType(ASE->getBase());
+    QualType ElemTy;
+    if (auto *AT = CGF.getContext().getAsArrayType(BaseTy))
+      ElemTy = AT->getElementType();
+    else
+      ElemTy = BaseTy->getPointeeType();
+    llvm::Value *ElemSize = CGF.getTypeSize(ElemTy);
+    if (const Expr *LenExpr = ASE->getLength()) {
+      llvm::Value *LenVal = CGF.EmitScalarExpr(LenExpr);
+      LenVal = CGF.Builder.CreateIntCast(LenVal, CGF.SizeTy,
+                                         /*isSigned=*/false);
+      SizeVal = CGF.Builder.CreateMul(ElemSize, LenVal);
+    } else {
+      // No length specified — fall back to pointer difference.
+      LValue UpAddrLVal =
+          CGF.EmitArraySectionExpr(ASE, /*IsLowerBound=*/false);
+      Address UpAddrAddress = UpAddrLVal.getAddress();
+      llvm::Value *UpAddr = CGF.Builder.CreateConstGEP1_32(
+          UpAddrAddress.getElementType(), UpAddrAddress.emitRawPointer(CGF),
+          /*Idx0=*/1);
+      SizeVal = CGF.Builder.CreatePtrDiff(UpAddr, Addr, "", /*IsNUW=*/false);
+    }
   } else {
     SizeVal = CGF.getTypeSize(Ty);
   }
