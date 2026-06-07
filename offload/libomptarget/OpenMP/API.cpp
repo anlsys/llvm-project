@@ -72,6 +72,7 @@ int32_t __kmpc_omp_task_with_deps(ident_t *loc_ref, int32_t gtid,
                                   int32_t ndeps_noalias,
                                   kmp_depend_info_t *noalias_dep_list)
     __attribute__((weak));
+
 }
 
 # if 0
@@ -557,6 +558,7 @@ EXTERN void *omp_target_memset_async(void *Ptr, int ByteVal, size_t NumBytes,
   return Ptr;
 }
 
+# if 0
 EXTERN int omp_target_memcpy_async(void *Dst, const void *Src, size_t Length,
                                    size_t DstOffset, size_t SrcOffset,
                                    int DstDevice, int SrcDevice,
@@ -585,6 +587,7 @@ EXTERN int omp_target_memcpy_async(void *Dst, const void *Src, size_t Length,
   ODBG(ODT_Interface) << __func__ << " returns " << Rc;
   return Rc;
 }
+# endif
 
 EXTERN int
 omp_target_memcpy_rect(void *Dst, const void *Src, size_t ElementSize,
