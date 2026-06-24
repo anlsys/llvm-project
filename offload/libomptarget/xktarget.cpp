@@ -220,7 +220,7 @@ __xktgt_target_kernel_launch(
     // TODO: support shared memory
 
     constexpr command_queue_type_t qtype = XKRT_QUEUE_TYPE_KERN;
-    constexpr ocg::command_type_t  ctype = ocg::COMMAND_TYPE_PROG;
+    constexpr cgir::command_type_t  ctype = cgir::COMMAND_TYPE_PROG;
     constexpr command_flag_t       flags = COMMAND_FLAG_NONE;
 
     const auto builder = [&] (command_t * cmd) {
@@ -398,7 +398,7 @@ __xktgt_target_data_update_nowait_mapper(
 
             // queue/command type
             const command_queue_type_t qtype = (ArgType & OMP_TGT_MAPTYPE_TO) ? XKRT_QUEUE_TYPE_H2D      : XKRT_QUEUE_TYPE_D2H;
-            const ocg::command_type_t  ctype = (ArgType & OMP_TGT_MAPTYPE_TO) ? ocg::COMMAND_TYPE_COPY_H2D_1D : ocg::COMMAND_TYPE_COPY_D2H_1D;
+            const cgir::command_type_t  ctype = (ArgType & OMP_TGT_MAPTYPE_TO) ? cgir::COMMAND_TYPE_COPY_H2D_1D : cgir::COMMAND_TYPE_COPY_D2H_1D;
             constexpr command_flag_t   flags = COMMAND_FLAG_NONE;
 
             xkomp->runtime.task_emit_command(
@@ -496,7 +496,7 @@ __xktgt_target_data_update_mapper(
             const uintptr_t src_ptr = (const uintptr_t) ((ArgType & OMP_TGT_MAPTYPE_TO) ? HstPtrBegin : TgtPtrBegin);
 
             // queue/command type
-            const ocg::command_type_t ctype = (ArgType & OMP_TGT_MAPTYPE_TO) ? ocg::COMMAND_TYPE_COPY_H2D_1D : ocg::COMMAND_TYPE_COPY_D2H_1D;
+            const cgir::command_type_t ctype = (ArgType & OMP_TGT_MAPTYPE_TO) ? cgir::COMMAND_TYPE_COPY_H2D_1D : cgir::COMMAND_TYPE_COPY_D2H_1D;
             constexpr command_flag_t flags = COMMAND_FLAG_SERIALIZED | COMMAND_FLAG_SYNCHRONOUS;
 
             // create and submit serialized command
