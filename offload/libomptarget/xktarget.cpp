@@ -227,8 +227,9 @@ __xktgt_target_kernel_launch(
         cmd->prog.launcher.variadic.fn        = GenericKernel.Func;
         cmd->prog.launcher.variadic.args      = LaunchParams.Data;
         cmd->prog.launcher.variadic.args_size = LaunchParams.Size;
-        cmd->prog.source                      = NULL;
-     // cmd->prog.source_type                 = none;
+        cmd->prog.source.type                 = cgir::COMMAND_PROG_SOURCE_TYPE_LLVMIR;
+        cmd->prog.source.content.llvmir.raw   = NULL;
+        cmd->prog.source.content.llvmir.size  = 0;
         cmd->prog.grid.x                      = NumBlocks[0];
         cmd->prog.grid.y                      = NumBlocks[1];
         cmd->prog.grid.z                      = NumBlocks[2];
