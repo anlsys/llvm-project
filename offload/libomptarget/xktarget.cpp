@@ -208,6 +208,17 @@ __xktgt_target_kernel_launch(
         NumBlocks[0]  = GenericKernel.getEffectiveNumBlocks(GenericDevice, NumBlocks[0], KernelArgs->Tripcount, NumThreads[0], KernelArgs->UserThreadLimit[0] > 0);
     }
 
+    // HIP (unlike CUDA) rejects a kernel launch when any grid or block
+    // dimension is 0, returning hipErrorInvalidValue. Unspecified y/z
+    // dimensions arrive here as 0 (the front-end fills only index [0] for
+    // 1-D launches). Normalize every dimension to at least 1 so the launch is
+    // valid on all backends.
+    for (int d = 0; d < 3; ++d)
+    {
+        if (NumThreads[d] == 0) NumThreads[d] = 1;
+        if (NumBlocks[d]  == 0) NumBlocks[d]  = 1;
+    }
+
     // launch the kernel
     const device_unique_id_t device_unique_id = omp_device_id_to_xkomp(DeviceId);
 

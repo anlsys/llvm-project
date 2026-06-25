@@ -11074,9 +11074,18 @@ static void genMapInfoForAccessClauses(
       const Decl *CanonDecl = AccessVD->getCanonicalDecl();
 
       // Search existing map entries for one that refers to the same variable
-      // and add the OMP_MAP_ACCESS flag to it. The variable should already
-      // be captured and present in CombinedInfo from genMapInfoForCaptures.
-      bool Found = false;
+      // and add the OMP_MAP_ACCESS flag to it.
+      //
+      // If no matching entry is found, the variable is named in an 'access'
+      // clause but is not referenced inside the target region, so it was never
+      // captured. That is allowed: the access still registers a data
+      // dependency with the runtime (it is appended to Data.Accesses /
+      // acs_list[] by buildAccesses, see CGStmtOpenMP), but since the variable
+      // is not a kernel argument there is no device pointer to resolve and
+      // nothing to flag here. Such unreferenced accesses are kept at the tail
+      // of the reordered access list, so the runtime's per-OMP_MAP_ACCESS
+      // indexing of the captured variables (xkomp_access_pointer) stays
+      // aligned. Simply skip it.
       for (unsigned I = 0, N = CombinedInfo.Exprs.size(); I < N; ++I) {
         const ValueDecl *EntryVD = CombinedInfo.Exprs[I].getMapDecl();
         if (!EntryVD)
@@ -11099,13 +11108,9 @@ static void genMapInfoForAccessClauses(
             CombinedInfo.Sizes[I] = SectionSize;
           }
 
-          Found = true;
           break;
         }
       }
-      (void)Found;
-      assert(Found && "Access clause variable not found in map entries — "
-                      "it should be captured by the target region");
     }
   }
 }
