@@ -29,6 +29,7 @@
 #include "clang/Basic/SourceManager.h"
 #include "clang/CodeGen/ConstantInitBuilder.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
@@ -42,8 +43,10 @@
 #include "llvm/Support/AtomicOrdering.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 #include <cassert>
 #include <cstdint>
+#include <functional>
 #include <numeric>
 #include <optional>
 
@@ -3770,38 +3773,81 @@ static void getKmpAffinityType(ASTContext &C, QualType &KmpTaskAffinityInfoTy) {
   }
 }
 
+/// Collect the transitive closure of *defined* globals referenced by \p Root
+/// (called functions and referenced global variables, recursively, including
+/// those nested inside ConstantExprs). \p Keep receives every defined
+/// GlobalValue reachable from \p Root (including \p Root). Declarations are not
+/// added (they remain external references). This lets us extract a
+/// self-contained sub-module for \p Root that still links/JITs.
+static void
+computeIRClosure(const llvm::Function *Root,
+                 llvm::SmallPtrSetImpl<const llvm::GlobalValue *> &Keep) {
+  llvm::SmallVector<const llvm::GlobalValue *, 16> Work;
+  auto Enqueue = [&](const llvm::GlobalValue *GV) {
+    if (GV && !GV->isDeclaration() && Keep.insert(GV).second)
+      Work.push_back(GV);
+  };
+  std::function<void(const llvm::Value *)> Visit = [&](const llvm::Value *V) {
+    if (const auto *GV = llvm::dyn_cast<llvm::GlobalValue>(V)) {
+      Enqueue(GV);
+      return;
+    }
+    if (const auto *C = llvm::dyn_cast<llvm::Constant>(V))
+      for (const llvm::Use &U : C->operands())
+        Visit(U.get());
+  };
+  Enqueue(Root);
+  while (!Work.empty()) {
+    const llvm::GlobalValue *GV = Work.pop_back_val();
+    if (const auto *F = llvm::dyn_cast<llvm::Function>(GV)) {
+      for (const llvm::BasicBlock &BB : *F)
+        for (const llvm::Instruction &I : BB)
+          for (const llvm::Value *Op : I.operands())
+            Visit(Op);
+    } else if (const auto *G = llvm::dyn_cast<llvm::GlobalVariable>(GV)) {
+      if (G->hasInitializer())
+        Visit(G->getInitializer());
+    }
+  }
+}
+
+/// Serialize the closure of \p Fn (see computeIRClosure) to LLVM bitcode in
+/// \p Out. Returns false on failure. The result is a pre-optimization snapshot:
+/// \p Fn and its transitively-referenced definitions are kept; everything else
+/// becomes an external declaration.
+static bool
+serializeClosureToBitcode(CodeGenModule &CGM, llvm::Function *Fn,
+                          llvm::SmallVectorImpl<char> &Out) {
+  llvm::SmallPtrSet<const llvm::GlobalValue *, 32> Keep;
+  computeIRClosure(Fn, Keep);
+
+  llvm::ValueToValueMapTy VMap;
+  std::unique_ptr<llvm::Module> Clone = llvm::CloneModule(
+      CGM.getModule(), VMap,
+      [&](const llvm::GlobalValue *GV) { return Keep.count(GV) != 0; });
+  if (!Clone)
+    return false;
+
+  llvm::raw_svector_ostream OS(Out);
+  llvm::WriteBitcodeToFile(*Clone, OS);
+  return !Out.empty();
+}
+
 /// Serialize the outlined task body \p Fn to LLVM bitcode, embed it as a private
 /// constant global, and return {i8* bitcode, size_t bytes} to forward to the
-/// runtime. Returns {null, 0} when \p Fn is null. The bitcode is a
-/// pre-optimization snapshot; globals referenced by \p Fn become declarations.
+/// runtime. Returns {null, 0} when \p Fn is null.
 static std::pair<llvm::Constant *, llvm::Value *>
 emitTaskSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
   llvm::Module &M = CGM.getModule();
   llvm::LLVMContext &Ctx = M.getContext();
-  llvm::Constant *NullPtr =
-      llvm::ConstantPointerNull::get(CGM.Int8PtrTy);
+  llvm::Constant *NullPtr = llvm::ConstantPointerNull::get(CGM.Int8PtrTy);
   llvm::Value *Zero = llvm::ConstantInt::get(CGM.SizeTy, 0);
 
   if (!Fn)
     return {NullPtr, Zero};
 
-  // Clone the module, keeping only `Fn`'s definition; everything else becomes
-  // an external declaration. This yields a small, self-contained module
-  // suitable as a CGIR program source.
-  llvm::ValueToValueMapTy VMap;
-  std::unique_ptr<llvm::Module> Clone = llvm::CloneModule(
-      M, VMap,
-      [&](const llvm::GlobalValue *GV) { return GV == Fn; });
-  if (!Clone)
-    return {NullPtr, Zero};
-
-  // Serialize to bitcode.
   llvm::SmallString<4096> Buffer;
-  {
-    llvm::raw_svector_ostream OS(Buffer);
-    llvm::WriteBitcodeToFile(*Clone, OS);
-  }
-  if (Buffer.empty())
+  if (!serializeClosureToBitcode(CGM, Fn, Buffer))
     return {NullPtr, Zero};
 
   // Embed as a private constant byte array global.
@@ -3817,6 +3863,38 @@ emitTaskSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
 
   llvm::Value *Size = llvm::ConstantInt::get(CGM.SizeTy, Buffer.size());
   return {GV, Size};
+}
+
+/// On device compilation, serialize the target-region kernel \p Fn's IR closure
+/// and embed it as an externally-visible device global named "<Fn>__ir", kept
+/// alive via llvm.used. The host runtime reads it back from the device image
+/// (offload GlobalHandler::readGlobalFromImage) and forwards it to XKOMP so the
+/// kernel can later be JIT-compiled/fused. No-op if \p Fn is null.
+static void
+emitTargetKernelSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
+  if (!Fn)
+    return;
+  llvm::Module &M = CGM.getModule();
+  llvm::LLVMContext &Ctx = M.getContext();
+
+  llvm::SmallString<4096> Buffer;
+  if (!serializeClosureToBitcode(CGM, Fn, Buffer))
+    return;
+
+  llvm::Constant *Init = llvm::ConstantDataArray::get(
+      Ctx, llvm::ArrayRef<uint8_t>(
+               reinterpret_cast<const uint8_t *>(Buffer.data()),
+               Buffer.size()));
+  // External linkage + llvm.used so the global survives optimization and the
+  // device assembler, landing in the device image's symbol table with its data.
+  // Not marked constant so it goes to ordinary (large) device global storage
+  // rather than the size-limited constant bank; the initializer still lives in
+  // the image and is read host-side via the offload GlobalHandler.
+  auto *GV = new llvm::GlobalVariable(
+      M, Init->getType(), /*isConstant=*/false,
+      llvm::GlobalValue::ExternalLinkage, Init,
+      llvm::Twine(Fn->getName()) + "__ir");
+  llvm::appendToUsed(M, {GV});
 }
 
 CGOpenMPRuntime::TaskResultTy
@@ -6662,6 +6740,11 @@ void CGOpenMPRuntime::emitTargetOutlinedFunctionHelper(
     return;
 
   CGM.getTargetCodeGenInfo().setTargetAttributes(nullptr, OutlinedFn, CGM);
+
+  // On device compilation, embed the kernel's LLVM-IR into the device image so
+  // the host runtime can forward it to XKOMP (see emitTargetKernelSourceIR).
+  if (CGM.getLangOpts().OpenMPIsTargetDevice && IsOffloadEntry)
+    emitTargetKernelSourceIR(CGM, OutlinedFn);
 
   for (auto *C : D.getClausesOfKind<OMPXAttributeClause>()) {
     for (auto *A : C->getAttrs()) {

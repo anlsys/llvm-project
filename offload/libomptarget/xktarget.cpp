@@ -6,6 +6,12 @@
 # include "Shared/APITypes.h"
 # include "xktarget.h"
 
+# include "llvm/Support/Error.h"
+
+# include <mutex>
+# include <string>
+# include <unordered_map>
+
 XKRT_NAMESPACE_USE;
 
 /// External function provided by the xkomp runtime.
@@ -45,6 +51,88 @@ static void
 __xktgt_target_kernel_launch_free_dup_args(void * args[XKRT_CALLBACK_ARGS_MAX])
 {
     free(args[0]);
+}
+
+/// Read the device-side LLVM-IR that clang embedded for a target kernel as the
+/// device global "<kernel>__ir" (see emitTargetKernelSourceIR). It is read
+/// host-side from the device image (no device memory access, no JIT), cached per
+/// kernel for the process lifetime. Sets {OutRaw, OutSize} to {NULL, 0} when no
+/// such global exists (e.g. a TU compiled without IR forwarding).
+static void
+__xktgt_get_kernel_ir(
+    llvm::omp::target::plugin::GenericPluginTy & Plugin,
+    llvm::omp::target::plugin::GenericDeviceTy & GenericDevice,
+    llvm::omp::target::plugin::GenericKernelTy & Kernel,
+    void *& OutRaw,
+    size_t & OutSize
+) {
+    using namespace llvm::omp::target::plugin;
+
+    /* per-kernel cache (the buffer is owned here, for the process lifetime) */
+    static std::mutex Mtx;
+    static std::unordered_map<const void *, std::pair<void *, size_t>> Cache;
+
+    const void * Key = (const void *) &Kernel;
+    {
+        std::lock_guard<std::mutex> Guard(Mtx);
+        auto It = Cache.find(Key);
+        if (It != Cache.end())
+        {
+            OutRaw  = It->second.first;
+            OutSize = It->second.second;
+            return ;
+        }
+    }
+
+    void * Raw  = NULL;
+    size_t Size = 0;
+
+    GenericGlobalHandlerTy & GH    = Plugin.getGlobalHandler();
+    DeviceImageTy          & Image = Kernel.getImage();
+    std::string              Name  = std::string(Kernel.getName()) + "__ir";
+
+    /* resolve size/presence from the image ELF (host-side) */
+    GlobalTy Meta(Name);
+    if (llvm::Error E = GH.getGlobalMetadataFromImage(GenericDevice, Image, Meta))
+    {
+        llvm::consumeError(std::move(E));   /* no IR embedded for this kernel */
+    }
+    else if (Meta.getSize() > 0)
+    {
+        void * Buf = malloc(Meta.getSize());
+        if (Buf)
+        {
+            GlobalTy Host(Name, Meta.getSize(), Buf);
+            if (llvm::Error E2 = GH.readGlobalFromImage(GenericDevice, Image, Host))
+            {
+                llvm::consumeError(std::move(E2));
+                free(Buf);
+            }
+            else
+            {
+                Raw  = Buf;
+                Size = Meta.getSize();
+            }
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> Guard(Mtx);
+        // another thread may have populated the entry while we read unlocked;
+        // if so, drop our buffer and use the existing one (avoids a leak)
+        auto It = Cache.find(Key);
+        if (It != Cache.end())
+        {
+            if (Raw)
+                free(Raw);
+            OutRaw  = It->second.first;
+            OutSize = It->second.second;
+            return ;
+        }
+        Cache[Key] = { Raw, Size };
+    }
+    OutRaw  = Raw;
+    OutSize = Size;
 }
 
 /// Implements a kernel entry that executes the target region on the specified
@@ -234,13 +322,22 @@ __xktgt_target_kernel_launch(
     constexpr cgir::command_type_t  ctype = cgir::COMMAND_TYPE_PROG;
     constexpr command_flag_t       flags = COMMAND_FLAG_NONE;
 
+    // device kernel LLVM-IR embedded by clang (read host-side from the image,
+    // cached). {NULL,0} if the TU was compiled without IR forwarding. The buffer
+    // is owned by the cache (process lifetime), so the command is non-owning.
+    void * KernelIR     = NULL;
+    size_t KernelIRSize = 0;
+    __xktgt_get_kernel_ir(*GenericPlugin, GenericDevice, GenericKernel, KernelIR, KernelIRSize);
+
     const auto builder = [&] (command_t * cmd) {
         cmd->prog.launcher.variadic.fn        = GenericKernel.Func;
         cmd->prog.launcher.variadic.args      = LaunchParams.Data;
         cmd->prog.launcher.variadic.args_size = LaunchParams.Size;
         cmd->prog.source.type                 = cgir::COMMAND_PROG_SOURCE_TYPE_LLVMIR;
-        cmd->prog.source.content.llvmir.raw   = NULL;
-        cmd->prog.source.content.llvmir.size  = 0;
+        cmd->prog.source.content.llvmir.raw    = KernelIR;
+        cmd->prog.source.content.llvmir.size   = KernelIRSize;
+        cmd->prog.source.content.llvmir._owned = false;   // owned by the cache
+        cmd->prog.source.content.llvmir.symbol = KernelIR ? GenericKernel.getName() : NULL;
         cmd->prog.grid.x                      = NumBlocks[0];
         cmd->prog.grid.y                      = NumBlocks[1];
         cmd->prog.grid.z                      = NumBlocks[2];
