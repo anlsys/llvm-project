@@ -33,6 +33,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/GlobalValue.h"
@@ -40,6 +41,7 @@
 #include "llvm/IR/Value.h"
 #include "llvm/Support/AtomicOrdering.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 #include <cassert>
 #include <cstdint>
 #include <numeric>
@@ -3768,6 +3770,61 @@ static void getKmpAffinityType(ASTContext &C, QualType &KmpTaskAffinityInfoTy) {
   }
 }
 
+/// Serialize the outlined task body \p Fn (and the declarations it references)
+/// to LLVM bitcode, embed it as a private constant global in the current
+/// module, and return a pair {i8* pointer-to-bitcode, size_t byte-size} to be
+/// forwarded to the XKOMP runtime (which attaches it to the per-source-location
+/// task format, so CGIR optimization passes such as program/loop fusion can use
+/// it). Returns {null, 0} on failure or when \p Fn is null.
+///
+/// NOTE: this clones the whole module (keeping only \p Fn defined) once per task
+/// construct; it is a pre-optimization snapshot. Private globals referenced by
+/// the body become external declarations in the extracted module.
+static std::pair<llvm::Constant *, llvm::Value *>
+emitTaskSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
+  llvm::Module &M = CGM.getModule();
+  llvm::LLVMContext &Ctx = M.getContext();
+  llvm::Constant *NullPtr =
+      llvm::ConstantPointerNull::get(CGM.Int8PtrTy);
+  llvm::Value *Zero = llvm::ConstantInt::get(CGM.SizeTy, 0);
+
+  if (!Fn)
+    return {NullPtr, Zero};
+
+  // Clone the module, keeping only `Fn`'s definition; everything else becomes
+  // an external declaration. This yields a small, self-contained module
+  // suitable as a CGIR program source.
+  llvm::ValueToValueMapTy VMap;
+  std::unique_ptr<llvm::Module> Clone = llvm::CloneModule(
+      M, VMap,
+      [&](const llvm::GlobalValue *GV) { return GV == Fn; });
+  if (!Clone)
+    return {NullPtr, Zero};
+
+  // Serialize to bitcode.
+  llvm::SmallString<4096> Buffer;
+  {
+    llvm::raw_svector_ostream OS(Buffer);
+    llvm::WriteBitcodeToFile(*Clone, OS);
+  }
+  if (Buffer.empty())
+    return {NullPtr, Zero};
+
+  // Embed as a private constant byte array global.
+  llvm::Constant *Init = llvm::ConstantDataArray::get(
+      Ctx, llvm::ArrayRef<uint8_t>(
+               reinterpret_cast<const uint8_t *>(Buffer.data()),
+               Buffer.size()));
+  auto *GV = new llvm::GlobalVariable(
+      M, Init->getType(), /*isConstant=*/true,
+      llvm::GlobalValue::PrivateLinkage, Init,
+      llvm::Twine(".omp_task_ir.") + Fn->getName());
+  GV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+
+  llvm::Value *Size = llvm::ConstantInt::get(CGM.SizeTy, Buffer.size());
+  return {GV, Size};
+}
+
 CGOpenMPRuntime::TaskResultTy
 CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
                               const OMPExecutableDirective &D,
@@ -3934,6 +3991,20 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
       });
   llvm::Value *Nacs = llvm::ConstantInt::get(CGF.Int32Ty, NumAccesses);
 
+  // Serialize the outlined task body to LLVM-IR and forward it to the runtime.
+  // For target (offload) directives the device kernel IR is not available in the
+  // host module, so we pass a {null, 0} placeholder for now; host tasks (and
+  // taskloops) carry their real body bitcode.
+  llvm::Constant *TaskIRPtr = nullptr;
+  llvm::Value *TaskIRSize = nullptr;
+  const bool EmbedTaskIR =
+      !isOpenMPTargetExecutionDirective(D.getDirectiveKind()) &&
+      !isOpenMPTargetDataManagementDirective(D.getDirectiveKind());
+  if (EmbedTaskIR)
+    std::tie(TaskIRPtr, TaskIRSize) = emitTaskSourceIR(CGM, TaskFunction);
+  else
+    std::tie(TaskIRPtr, TaskIRSize) = emitTaskSourceIR(CGM, /*Fn=*/nullptr);
+
   // Arguments of the func call
   SmallVector<llvm::Value *, 10> AllocArgs = {
       emitUpdateLocation(CGF, Loc),
@@ -3962,6 +4033,8 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
     AllocArgs.push_back(DeviceID);
     AllocArgs.push_back(Ndeps);
     AllocArgs.push_back(Nacs);
+    AllocArgs.push_back(TaskIRPtr);
+    AllocArgs.push_back(TaskIRSize);
     NewTask = CGF.EmitRuntimeCall(
         OMPBuilder.getOrCreateRuntimeFunction(
             CGM.getModule(), OMPRTL___kmpc_omp_target_task_alloc_with_deps),
@@ -3970,6 +4043,8 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
   } else {
     AllocArgs.push_back(Ndeps);
     AllocArgs.push_back(Nacs);
+    AllocArgs.push_back(TaskIRPtr);
+    AllocArgs.push_back(TaskIRSize);
     NewTask =
         CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
                                 CGM.getModule(), OMPRTL___kmpc_omp_task_alloc_with_deps),
