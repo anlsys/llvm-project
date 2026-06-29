@@ -3770,16 +3770,10 @@ static void getKmpAffinityType(ASTContext &C, QualType &KmpTaskAffinityInfoTy) {
   }
 }
 
-/// Serialize the outlined task body \p Fn (and the declarations it references)
-/// to LLVM bitcode, embed it as a private constant global in the current
-/// module, and return a pair {i8* pointer-to-bitcode, size_t byte-size} to be
-/// forwarded to the XKOMP runtime (which attaches it to the per-source-location
-/// task format, so CGIR optimization passes such as program/loop fusion can use
-/// it). Returns {null, 0} on failure or when \p Fn is null.
-///
-/// NOTE: this clones the whole module (keeping only \p Fn defined) once per task
-/// construct; it is a pre-optimization snapshot. Private globals referenced by
-/// the body become external declarations in the extracted module.
+/// Serialize the outlined task body \p Fn to LLVM bitcode, embed it as a private
+/// constant global, and return {i8* bitcode, size_t bytes} to forward to the
+/// runtime. Returns {null, 0} when \p Fn is null. The bitcode is a
+/// pre-optimization snapshot; globals referenced by \p Fn become declarations.
 static std::pair<llvm::Constant *, llvm::Value *>
 emitTaskSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
   llvm::Module &M = CGM.getModule();
@@ -3991,10 +3985,8 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
       });
   llvm::Value *Nacs = llvm::ConstantInt::get(CGF.Int32Ty, NumAccesses);
 
-  // Serialize the outlined task body to LLVM-IR and forward it to the runtime.
-  // For target (offload) directives the device kernel IR is not available in the
-  // host module, so we pass a {null, 0} placeholder for now; host tasks (and
-  // taskloops) carry their real body bitcode.
+  // Forward the task body's bitcode to the runtime. Target directives have no
+  // device IR in the host module, so they pass {null, 0} for now.
   llvm::Constant *TaskIRPtr = nullptr;
   llvm::Value *TaskIRSize = nullptr;
   const bool EmbedTaskIR =
