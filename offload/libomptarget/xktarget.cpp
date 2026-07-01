@@ -66,7 +66,10 @@ __xktgt_get_kernel_ir(
     void *& OutRaw,
     size_t & OutSize
 ) {
-    using namespace llvm::omp::target::plugin;
+    /* Fully qualify the plugin types: `DeviceImageTy` also exists in the global
+     * namespace (offload/include/DeviceImage.h), so a `using namespace` here
+     * would be ambiguous. */
+    namespace plugin = llvm::omp::target::plugin;
 
     /* per-kernel cache (the buffer is owned here, for the process lifetime) */
     static std::mutex Mtx;
@@ -87,12 +90,12 @@ __xktgt_get_kernel_ir(
     void * Raw  = NULL;
     size_t Size = 0;
 
-    GenericGlobalHandlerTy & GH    = Plugin.getGlobalHandler();
-    DeviceImageTy          & Image = Kernel.getImage();
-    std::string              Name  = std::string(Kernel.getName()) + "__ir";
+    plugin::GenericGlobalHandlerTy & GH    = Plugin.getGlobalHandler();
+    plugin::DeviceImageTy          & Image = Kernel.getImage();
+    std::string                      Name  = std::string(Kernel.getName()) + "__ir";
 
     /* resolve size/presence from the image ELF (host-side) */
-    GlobalTy Meta(Name);
+    plugin::GlobalTy Meta(Name);
     if (llvm::Error E = GH.getGlobalMetadataFromImage(GenericDevice, Image, Meta))
     {
         llvm::consumeError(std::move(E));   /* no IR embedded for this kernel */
@@ -102,7 +105,7 @@ __xktgt_get_kernel_ir(
         void * Buf = malloc(Meta.getSize());
         if (Buf)
         {
-            GlobalTy Host(Name, Meta.getSize(), Buf);
+            plugin::GlobalTy Host(Name, Meta.getSize(), Buf);
             if (llvm::Error E2 = GH.readGlobalFromImage(GenericDevice, Image, Host))
             {
                 llvm::consumeError(std::move(E2));
