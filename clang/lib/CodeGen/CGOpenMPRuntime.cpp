@@ -3833,9 +3833,19 @@ computeIRClosure(const llvm::Function *Root,
 /// \p Out. Returns false on failure. The result is a pre-optimization snapshot:
 /// \p Fn and its transitively-referenced definitions are kept; everything else
 /// becomes an external declaration.
+///
+/// When \p Externs is non-null, the closure's referenced *mutable* global
+/// variables are turned into external *declarations* in the clone and the
+/// corresponding originals are appended to \p Externs. This lets the in-process
+/// JIT (CGIR) bind them to the process's real objects (via their addresses,
+/// emitted by the caller) instead of duplicating module-local storage — the
+/// difference between a JIT'd task body updating the real arrays vs a private
+/// copy. Read-only constants are left defined (harmless to duplicate). Pass null
+/// on the device path, where globals must stay defined in the device image.
 static bool
 serializeClosureToBitcode(CodeGenModule &CGM, llvm::Function *Fn,
-                          llvm::SmallVectorImpl<char> &Out) {
+                          llvm::SmallVectorImpl<char> &Out,
+                          llvm::SmallVectorImpl<llvm::GlobalVariable *> *Externs) {
   llvm::SmallPtrSet<const llvm::GlobalValue *, 32> Keep;
   computeIRClosure(Fn, Keep);
 
@@ -3855,15 +3865,44 @@ serializeClosureToBitcode(CodeGenModule &CGM, llvm::Function *Fn,
     ClonedEntry->setVisibility(llvm::GlobalValue::DefaultVisibility);
   }
 
+  // Externalize referenced mutable global variables (see the doc comment).
+  if (Externs) {
+    for (const llvm::GlobalValue *GV : Keep) {
+      const auto *G = llvm::dyn_cast<llvm::GlobalVariable>(GV);
+      if (!G || G->isConstant() || !G->hasInitializer() || G->isThreadLocal())
+        continue;
+      auto *ClonedG =
+          llvm::dyn_cast_or_null<llvm::GlobalVariable>(VMap.lookup(G));
+      if (!ClonedG || ClonedG->isDeclaration())
+        continue;
+      ClonedG->setInitializer(nullptr);
+      ClonedG->setComdat(nullptr);
+      ClonedG->setLinkage(llvm::GlobalValue::ExternalLinkage);
+      ClonedG->setVisibility(llvm::GlobalValue::DefaultVisibility);
+      Externs->push_back(const_cast<llvm::GlobalVariable *>(G));
+    }
+  }
+
   llvm::raw_svector_ostream OS(Out);
   llvm::WriteBitcodeToFile(*Clone, OS);
   return !Out.empty();
 }
 
+/// {bitcode, size, externs-table, externs-count} forwarded to the runtime for a
+/// task body: the serialized IR closure plus the resolution table for the
+/// mutable globals the body references (see emitTaskSourceIR).
+struct TaskSourceIR {
+  llvm::Constant *IRPtr;        // i8* to the embedded bitcode (or null)
+  llvm::Value    *IRSize;       // size_t bytes
+  llvm::Constant *ExternsPtr;   // {i8* name, i8* addr}[] table (or null)
+  llvm::Value    *ExternsCount; // size_t number of entries
+};
+
 /// Serialize the outlined task body \p Fn to LLVM bitcode, embed it as a private
-/// constant global, and return {i8* bitcode, size_t bytes} to forward to the
-/// runtime. Returns {null, 0} when \p Fn is null.
-static std::pair<llvm::Constant *, llvm::Value *>
+/// constant global, and (for the mutable globals the body references) emit a
+/// resolution table mapping each externalized global's name to its real runtime
+/// address. Returns null/0 fields when \p Fn is null.
+static TaskSourceIR
 emitTaskSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
   llvm::Module &M = CGM.getModule();
   llvm::LLVMContext &Ctx = M.getContext();
@@ -3871,11 +3910,12 @@ emitTaskSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
   llvm::Value *Zero = llvm::ConstantInt::get(CGM.SizeTy, 0);
 
   if (!Fn)
-    return {NullPtr, Zero};
+    return {NullPtr, Zero, NullPtr, Zero};
 
   llvm::SmallString<4096> Buffer;
-  if (!serializeClosureToBitcode(CGM, Fn, Buffer))
-    return {NullPtr, Zero};
+  llvm::SmallVector<llvm::GlobalVariable *, 8> Externs;
+  if (!serializeClosureToBitcode(CGM, Fn, Buffer, &Externs))
+    return {NullPtr, Zero, NullPtr, Zero};
 
   // Embed as a private constant byte array global.
   llvm::Constant *Init = llvm::ConstantDataArray::get(
@@ -3889,7 +3929,40 @@ emitTaskSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
   GV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
 
   llvm::Value *Size = llvm::ConstantInt::get(CGM.SizeTy, Buffer.size());
-  return {GV, Size};
+
+  // Build the externalized-global resolution table:
+  //   struct { i8* name; i8* addr; } __omp_task_externs.<Fn>[N]
+  // `addr` is a reference to the original (module-defined) global, so at load
+  // time it resolves to the real runtime address. The runtime forwards this to
+  // CGIR's jit, which installs each as an absolute symbol.
+  llvm::Constant *ExternsPtr = NullPtr;
+  llvm::Value *ExternsCount = Zero;
+  if (!Externs.empty()) {
+    llvm::StructType *EntryTy =
+        llvm::StructType::get(CGM.Int8PtrTy, CGM.Int8PtrTy);
+    llvm::SmallVector<llvm::Constant *, 8> Entries;
+    Entries.reserve(Externs.size());
+    for (llvm::GlobalVariable *G : Externs) {
+      llvm::Constant *Name =
+          CGM.GetAddrOfConstantCString(G->getName().str()).getPointer();
+      llvm::Constant *NameC =
+          llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(Name,
+                                                               CGM.Int8PtrTy);
+      llvm::Constant *AddrC =
+          llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(G, CGM.Int8PtrTy);
+      Entries.push_back(llvm::ConstantStruct::get(EntryTy, {NameC, AddrC}));
+    }
+    llvm::ArrayType *ArrTy = llvm::ArrayType::get(EntryTy, Entries.size());
+    llvm::Constant *ArrInit = llvm::ConstantArray::get(ArrTy, Entries);
+    auto *ExternsGV = new llvm::GlobalVariable(
+        M, ArrTy, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
+        ArrInit, llvm::Twine(".omp_task_externs.") + Fn->getName());
+    ExternsGV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    ExternsPtr = ExternsGV;
+    ExternsCount = llvm::ConstantInt::get(CGM.SizeTy, Externs.size());
+  }
+
+  return {GV, Size, ExternsPtr, ExternsCount};
 }
 
 /// On device compilation, serialize the target-region kernel \p Fn's IR closure
@@ -3905,7 +3978,7 @@ emitTargetKernelSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
   llvm::LLVMContext &Ctx = M.getContext();
 
   llvm::SmallString<4096> Buffer;
-  if (!serializeClosureToBitcode(CGM, Fn, Buffer))
+  if (!serializeClosureToBitcode(CGM, Fn, Buffer, /*Externs=*/nullptr))
     return;
 
   llvm::Constant *Init = llvm::ConstantDataArray::get(
@@ -4091,20 +4164,21 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
   llvm::Value *Nacs = llvm::ConstantInt::get(CGF.Int32Ty, NumAccesses);
 
   // Forward the task's LLVM-IR to the runtime so it can be JIT-compiled/fused.
-  // We forward the proxy entry (kmp_int32 .omp_task_entry.(gtid, kmp_task_t*)),
-  // which is exactly what the runtime invokes via kmp_task_t::routine, together
-  // with its closure (the outlined body). Target directives have no device IR in
-  // the host module, so they pass {null, 0} here (the device IR is forwarded
-  // separately from the device image, see emitTargetKernelSourceIR).
-  llvm::Constant *TaskIRPtr = nullptr;
-  llvm::Value *TaskIRSize = nullptr;
+  // We forward the proxy entry (void .omp_task_entry.(void** args)), which is
+  // exactly what the runtime invokes via kmp_task_t::routine, together with its
+  // closure (the outlined body) and a resolution table for the mutable globals
+  // the body references (so the JIT binds them to the real objects). Target
+  // directives have no device IR in the host module, so they pass null/0 here
+  // (the device IR is forwarded separately, see emitTargetKernelSourceIR).
   const bool EmbedTaskIR =
       !isOpenMPTargetExecutionDirective(D.getDirectiveKind()) &&
       !isOpenMPTargetDataManagementDirective(D.getDirectiveKind());
-  if (EmbedTaskIR)
-    std::tie(TaskIRPtr, TaskIRSize) = emitTaskSourceIR(CGM, TaskEntry);
-  else
-    std::tie(TaskIRPtr, TaskIRSize) = emitTaskSourceIR(CGM, /*Fn=*/nullptr);
+  TaskSourceIR TaskIR =
+      emitTaskSourceIR(CGM, EmbedTaskIR ? TaskEntry : /*Fn=*/nullptr);
+  llvm::Constant *TaskIRPtr = TaskIR.IRPtr;
+  llvm::Value *TaskIRSize = TaskIR.IRSize;
+  llvm::Constant *TaskIRExternsPtr = TaskIR.ExternsPtr;
+  llvm::Value *TaskIRExternsCount = TaskIR.ExternsCount;
 
   // Arguments of the func call
   SmallVector<llvm::Value *, 10> AllocArgs = {
@@ -4136,6 +4210,8 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
     AllocArgs.push_back(Nacs);
     AllocArgs.push_back(TaskIRPtr);
     AllocArgs.push_back(TaskIRSize);
+    AllocArgs.push_back(TaskIRExternsPtr);
+    AllocArgs.push_back(TaskIRExternsCount);
     NewTask = CGF.EmitRuntimeCall(
         OMPBuilder.getOrCreateRuntimeFunction(
             CGM.getModule(), OMPRTL___kmpc_omp_target_task_alloc_with_deps),
@@ -4146,6 +4222,8 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
     AllocArgs.push_back(Nacs);
     AllocArgs.push_back(TaskIRPtr);
     AllocArgs.push_back(TaskIRSize);
+    AllocArgs.push_back(TaskIRExternsPtr);
+    AllocArgs.push_back(TaskIRExternsCount);
     NewTask =
         CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
                                 CGM.getModule(), OMPRTL___kmpc_omp_task_alloc_with_deps),
