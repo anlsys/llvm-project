@@ -3177,16 +3177,21 @@ emitProxyTaskFunction(CodeGenModule &CGM, SourceLocation Loc,
   // The gtid is not part of the void(void**) ABI; recorded task bodies replay
   // with gtid 0 (matching the previous taskgraph replay path).
   llvm::Value *GtidParam = llvm::ConstantInt::get(CGF.Int32Ty, 0);
-  // tt = (kmp_task_t_with_privates *) args[0]
+  // tt = (kmp_task_t_with_privates *) args[0]. Materialize it into a
+  // KmpTaskTWithPrivates* temp and reuse EmitLoadOfPointerLValue, exactly like
+  // the classic proxy did with its task parameter, so the rest of the function
+  // is unchanged.
   llvm::Value *ArgsPtr = CGF.Builder.CreateLoad(CGF.GetAddrOfLocalVar(ArgsArg));
   llvm::Value *TaskVoidPtr = CGF.Builder.CreateAlignedLoad(
       CGF.VoidPtrTy, ArgsPtr, CGF.getPointerAlign());
-  Address TDBaseAddr(
+  Address TaskTypeAddr =
+      CGF.CreateMemTemp(KmpTaskTWithPrivatesPtrQTy, "tt.addr");
+  CGF.Builder.CreateStore(
       CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
           TaskVoidPtr, CGF.ConvertTypeForMem(KmpTaskTWithPrivatesPtrQTy)),
-      CGF.ConvertTypeForMem(KmpTaskTWithPrivatesQTy),
-      CGM.getNaturalTypeAlignment(KmpTaskTWithPrivatesQTy));
-  LValue TDBase = CGF.MakeAddrLValue(TDBaseAddr, KmpTaskTWithPrivatesQTy);
+      TaskTypeAddr);
+  LValue TDBase = CGF.EmitLoadOfPointerLValue(
+      TaskTypeAddr, KmpTaskTWithPrivatesPtrQTy->castAs<PointerType>());
   const auto *KmpTaskTWithPrivatesQTyRD =
       KmpTaskTWithPrivatesQTy->castAsRecordDecl();
   LValue Base =
