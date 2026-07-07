@@ -3149,6 +3149,13 @@ emitProxyTaskFunction(CodeGenModule &CGM, SourceLocation Loc,
   // from it exactly as before. Exposing the body as a plain void(void**) program
   // (rather than a runtime-specific proxy) is what lets CGIR's prog-fuse pass
   // merge consecutive OpenMP task bodies.
+  //
+  // TODO (loop fusion): because the body reaches its captured data through args[0]
+  // (== tt) rather than via distinct per-value arg slots, CGIR can fuse task
+  // bodies only at the PROGRAM level (one wrapper calling each), not at the LOOP
+  // level -- each body keeps its own base pointers/offsets, which LLVM cannot
+  // align across bodies. Emitting the captured arrays/offsets as separate
+  // deduplicable args (leaf-kernel form) would enable cross-task loop fusion.
   QualType VoidPtrPtrTy = C.getPointerType(C.VoidPtrTy);
   auto *ArgsArg =
       ImplicitParamDecl::Create(C, /*DC=*/nullptr, Loc, /*Id=*/nullptr,

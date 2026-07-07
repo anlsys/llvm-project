@@ -333,9 +333,13 @@ __xktgt_target_kernel_launch(
     __xktgt_get_kernel_ir(*GenericPlugin, GenericDevice, GenericKernel, KernelIR, KernelIRSize);
 
     const auto builder = [&] (command_t * cmd) {
-        cmd->prog.launcher.variadic.fn        = GenericKernel.Func;
-        cmd->prog.launcher.variadic.args      = LaunchParams.Data;
-        cmd->prog.launcher.variadic.args_size = LaunchParams.Size;
+        // CGIR's uniform variadic launch form: `args` is the kernelParams array
+        // (LaunchParams.Ptrs -- one pointer per kernel parameter), `n_args` its
+        // count. `fn` carries the device kernel handle in the void(void**) fn
+        // slot (function<->object pointer reinterpret is POSIX-safe).
+        cmd->prog.launcher.variadic.fn     = reinterpret_cast<void (*)(void **)>(GenericKernel.Func);
+        cmd->prog.launcher.variadic.args   = LaunchParams.Ptrs;
+        cmd->prog.launcher.variadic.n_args = LaunchParams.Size / sizeof(void *);
         cmd->prog.source.type                 = cgir::COMMAND_PROG_SOURCE_TYPE_LLVMIR;
         cmd->prog.source.content.llvmir.raw    = KernelIR;
         cmd->prog.source.content.llvmir.size   = KernelIRSize;
@@ -361,19 +365,30 @@ __xktgt_target_kernel_launch(
             // TODO: can be do faster than a malloc here?
             // idea: have a `small_vector_t` within the `command_t`
 
-            // dupplicate args
-            void * dup_args = malloc(LaunchParams.Size);
-            assert(dup_args);
-            memcpy(dup_args, LaunchParams.Data, LaunchParams.Size);
+            // The deferred command outlives this call, but LaunchParams.Ptrs/Data
+            // point into stack-local vectors. Duplicate BOTH the parameter values
+            // (Data) and a fresh pointer array into them (the kernelParams), so
+            // the recorded launch stays valid at (possibly much later) replay.
+            const size_t n_args = LaunchParams.Size / sizeof(void *);
+            void ** dup_vals = (void **) malloc(LaunchParams.Size);
+            assert(dup_vals);
+            memcpy(dup_vals, LaunchParams.Data, LaunchParams.Size);
+            void ** dup_ptrs = (void **) malloc(n_args * sizeof(void *));
+            assert(dup_ptrs);
+            for (size_t i = 0 ; i < n_args ; ++i)
+                dup_ptrs[i] = &dup_vals[i];
 
-            command->prog.launcher.variadic.args = dup_args;
+            command->prog.launcher.variadic.args   = dup_ptrs;
+            command->prog.launcher.variadic.n_args = n_args;
 
             // TODO: reenable this free, but gotta find a way to handle replay in TDG
+            // (must free both dup_ptrs and dup_vals). Currently leaked.
             # if 0
             // set callback to release args
             callback_t cb;
             cb.func = __xktgt_target_kernel_launch_free_dup_args;
-            cb.args[0] = dup_args;
+            cb.args[0] = dup_ptrs;
+            cb.args[1] = dup_vals;
             command->completion_callback_push(cb);
             # endif
         };
@@ -383,11 +398,13 @@ __xktgt_target_kernel_launch(
     // else, submit serialized command
     else
     {
-        // can use heap-allocated args
+        // serialized+synchronous: the launch happens within command_submit (the
+        // driver reads kernelParams during cuLaunchKernel/hipModuleLaunchKernel),
+        // so the stack-local LaunchParams.Ptrs is valid for the whole call.
         constexpr command_flag_t flags = COMMAND_FLAG_SERIALIZED | COMMAND_FLAG_SYNCHRONOUS;
         command_t command(ctype, flags);
         builder(&command);
-        command.prog.launcher.variadic.args = LaunchParams.Data;
+        command.prog.launcher.variadic.args = LaunchParams.Ptrs;   // n_args set by builder
         xkomp->runtime.command_submit(device_unique_id, &command);
     }
 
