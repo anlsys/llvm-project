@@ -43,7 +43,6 @@
 #include "llvm/Support/AtomicOrdering.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Passes/PassBuilder.h"
-#include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include "llvm/Transforms/Scalar/SROA.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
@@ -3859,33 +3858,62 @@ computeIRClosure(const llvm::Function *Root,
   }
 }
 
-/// Optimize the cloned task-body closure \p M in place so the recorded snapshot
-/// reaches CGIR's prog-fuse already scalarized -- the same shape a device kernel
-/// has, since device IR reaches the runtime post-optimization. AlwaysInline
-/// folds the outlined region (and, at -O>0, the always-inline privates map) into
-/// the leaf entry, and SROA promotes the leaf's reconstructed local task struct
-/// and locals to SSA. This is what lets prog-fuse deduplicate the captured
-/// scalars and fuse the bodies' loops, WITHOUT prog-fuse having to optimize the
-/// snapshot. At -O0 the privates map is noinline, so this is largely a no-op and
-/// such bodies simply do not loop-fuse -- the expected behavior.
-static void optimizeTaskClosure(llvm::Module &M) {
-  llvm::PassBuilder PB;
-  llvm::LoopAnalysisManager LAM;
-  llvm::FunctionAnalysisManager FAM;
-  llvm::CGSCCAnalysisManager CGAM;
-  llvm::ModuleAnalysisManager MAM;
-  PB.registerModuleAnalyses(MAM);
-  PB.registerCGSCCAnalyses(CGAM);
-  PB.registerFunctionAnalyses(FAM);
-  PB.registerLoopAnalyses(LAM);
-  PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+/// Scalarize the cloned task-body closure's leaf \p Entry in place so the
+/// recorded snapshot reaches CGIR's prog-fuse already scalarized -- the same
+/// shape a device kernel has (device IR reaches the runtime post-optimization).
+/// We fold the always-inline task helpers (the outlined region and, at -O>0, the
+/// privates map) into the leaf and SROA it, so its reconstructed local task
+/// struct / shareds / ptmp promote to SSA and the captured values become the
+/// loop base -- which is what lets prog-fuse deduplicate them and fuse the loops.
+///
+/// This runs DURING clang codegen, so the module still contains INCOMPLETE
+/// functions (e.g. the enclosing function whose body is mid-emission, reachable
+/// from the closure when the task body recurses into it). We therefore MUST NOT
+/// run a whole-module pass (a DominatorTree over a half-built CFG crashes):
+/// inlining is done with the targeted InlineFunction API (always-inline helpers
+/// only, never the enclosing function), and SROA is run on the leaf alone, which
+/// emitTaskLeafKernel has fully emitted by now. At -O0 the privates map is
+/// noinline, so it stays a call and the body simply does not loop-fuse -- as
+/// expected.
+static void optimizeTaskClosure(llvm::Function *Entry) {
+  if (!Entry || Entry->isDeclaration())
+    return;
 
-  llvm::ModulePassManager MPM;
-  MPM.addPass(llvm::AlwaysInlinerPass());
+  // Inline the always-inline helpers into the leaf (targeted; never touches the
+  // possibly-incomplete enclosing function, which is not always-inline).
+  unsigned Budget = 4096;
+  bool Changed = true;
+  while (Changed && Budget) {
+    Changed = false;
+    for (llvm::BasicBlock &BB : *Entry) {
+      for (llvm::Instruction &I : BB) {
+        auto *CI = llvm::dyn_cast<llvm::CallInst>(&I);
+        if (!CI)
+          continue;
+        llvm::Function *Callee = CI->getCalledFunction();
+        if (!Callee || Callee->isDeclaration() || Callee == Entry ||
+            !Callee->hasFnAttribute(llvm::Attribute::AlwaysInline))
+          continue;
+        llvm::InlineFunctionInfo IFI;
+        if (llvm::InlineFunction(*CI, IFI).isSuccess()) {
+          --Budget;
+          Changed = true;
+          break; // iterators invalidated: restart the scan
+        }
+      }
+      if (Changed)
+        break;
+    }
+  }
+
+  // SROA the leaf ONLY (it is complete). This promotes the reconstructed local
+  // task struct / shareds record / ptmp (and the loop induction var) to SSA.
+  llvm::PassBuilder PB;
+  llvm::FunctionAnalysisManager FAM;
+  PB.registerFunctionAnalyses(FAM);
   llvm::FunctionPassManager FPM;
   FPM.addPass(llvm::SROAPass(llvm::SROAOptions(llvm::SROAOptions::ModifyCFG)));
-  MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
-  MPM.run(M, MAM);
+  FPM.run(*Entry, FAM);
 }
 
 /// Serialize the closure of \p Fn (see computeIRClosure) to LLVM bitcode in
@@ -3922,8 +3950,8 @@ serializeClosureToBitcode(CodeGenModule &CGM, llvm::Function *Fn,
   // Externalize the entry in the clone so the in-process JIT can resolve it
   // (the original task/proxy function is internal). The clone is discarded
   // after serialization, so this does not affect the real module.
-  if (auto *ClonedEntry =
-          llvm::dyn_cast_or_null<llvm::Function>(VMap.lookup(Fn))) {
+  auto *ClonedEntry = llvm::dyn_cast_or_null<llvm::Function>(VMap.lookup(Fn));
+  if (ClonedEntry) {
     ClonedEntry->setLinkage(llvm::GlobalValue::ExternalLinkage);
     ClonedEntry->setVisibility(llvm::GlobalValue::DefaultVisibility);
   }
@@ -3946,11 +3974,10 @@ serializeClosureToBitcode(CodeGenModule &CGM, llvm::Function *Fn,
     }
   }
 
-  // Scalarize the clone (inline + SROA) so the recorded snapshot is directly
-  // fusable; done after externalizing the entry/globals so those references are
-  // preserved through optimization.
+  // Scalarize the leaf so the recorded snapshot is directly fusable; done after
+  // externalizing the entry/globals so those references are preserved.
   if (OptimizeClone)
-    optimizeTaskClosure(*Clone);
+    optimizeTaskClosure(ClonedEntry);
 
   llvm::raw_svector_ostream OS(Out);
   llvm::WriteBitcodeToFile(*Clone, OS);
