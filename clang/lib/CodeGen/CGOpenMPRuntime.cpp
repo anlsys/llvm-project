@@ -42,6 +42,9 @@
 #include "llvm/IR/Value.h"
 #include "llvm/Support/AtomicOrdering.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Transforms/IPO/AlwaysInliner.h"
+#include "llvm/Transforms/Scalar/SROA.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 #include <cassert>
@@ -3856,10 +3859,42 @@ computeIRClosure(const llvm::Function *Root,
   }
 }
 
+/// Optimize the cloned task-body closure \p M in place so the recorded snapshot
+/// reaches CGIR's prog-fuse already scalarized -- the same shape a device kernel
+/// has, since device IR reaches the runtime post-optimization. AlwaysInline
+/// folds the outlined region (and, at -O>0, the always-inline privates map) into
+/// the leaf entry, and SROA promotes the leaf's reconstructed local task struct
+/// and locals to SSA. This is what lets prog-fuse deduplicate the captured
+/// scalars and fuse the bodies' loops, WITHOUT prog-fuse having to optimize the
+/// snapshot. At -O0 the privates map is noinline, so this is largely a no-op and
+/// such bodies simply do not loop-fuse -- the expected behavior.
+static void optimizeTaskClosure(llvm::Module &M) {
+  llvm::PassBuilder PB;
+  llvm::LoopAnalysisManager LAM;
+  llvm::FunctionAnalysisManager FAM;
+  llvm::CGSCCAnalysisManager CGAM;
+  llvm::ModuleAnalysisManager MAM;
+  PB.registerModuleAnalyses(MAM);
+  PB.registerCGSCCAnalyses(CGAM);
+  PB.registerFunctionAnalyses(FAM);
+  PB.registerLoopAnalyses(LAM);
+  PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+  llvm::ModulePassManager MPM;
+  MPM.addPass(llvm::AlwaysInlinerPass());
+  llvm::FunctionPassManager FPM;
+  FPM.addPass(llvm::SROAPass(llvm::SROAOptions(llvm::SROAOptions::ModifyCFG)));
+  MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
+  MPM.run(M, MAM);
+}
+
 /// Serialize the closure of \p Fn (see computeIRClosure) to LLVM bitcode in
-/// \p Out. Returns false on failure. The result is a pre-optimization snapshot:
-/// \p Fn and its transitively-referenced definitions are kept; everything else
-/// becomes an external declaration.
+/// \p Out. Returns false on failure. \p Fn and its transitively-referenced
+/// definitions are kept; everything else becomes an external declaration.
+///
+/// When \p OptimizeClone is set, the clone is scalarized before serialization
+/// (see optimizeTaskClosure) so the recorded snapshot is directly fusable;
+/// otherwise it is a raw pre-optimization snapshot.
 ///
 /// When \p Externs is non-null, the closure's referenced *mutable* global
 /// variables are turned into external *declarations* in the clone and the
@@ -3872,7 +3907,8 @@ computeIRClosure(const llvm::Function *Root,
 static bool
 serializeClosureToBitcode(CodeGenModule &CGM, llvm::Function *Fn,
                           llvm::SmallVectorImpl<char> &Out,
-                          llvm::SmallVectorImpl<llvm::GlobalVariable *> *Externs) {
+                          llvm::SmallVectorImpl<llvm::GlobalVariable *> *Externs,
+                          bool OptimizeClone = false) {
   llvm::SmallPtrSet<const llvm::GlobalValue *, 32> Keep;
   computeIRClosure(Fn, Keep);
 
@@ -3910,6 +3946,12 @@ serializeClosureToBitcode(CodeGenModule &CGM, llvm::Function *Fn,
     }
   }
 
+  // Scalarize the clone (inline + SROA) so the recorded snapshot is directly
+  // fusable; done after externalizing the entry/globals so those references are
+  // preserved through optimization.
+  if (OptimizeClone)
+    optimizeTaskClosure(*Clone);
+
   llvm::raw_svector_ostream OS(Out);
   llvm::WriteBitcodeToFile(*Clone, OS);
   return !Out.empty();
@@ -3941,7 +3983,9 @@ emitTaskSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
 
   llvm::SmallString<4096> Buffer;
   llvm::SmallVector<llvm::GlobalVariable *, 8> Externs;
-  if (!serializeClosureToBitcode(CGM, Fn, Buffer, &Externs))
+  // Optimize (scalarize) the closure so a leaf task body is recorded in a
+  // directly-fusable form; see optimizeTaskClosure.
+  if (!serializeClosureToBitcode(CGM, Fn, Buffer, &Externs, /*OptimizeClone=*/true))
     return {NullPtr, Zero, NullPtr, Zero};
 
   // Embed as a private constant byte array global.
