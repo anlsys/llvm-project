@@ -3126,9 +3126,9 @@ createKmpTaskTWithPrivatesRecordDecl(CodeGenModule &CGM, QualType KmpTaskTQTy,
 
 /// Emit the call to the outlined \p TaskFunction given the KmpTaskTWithPrivates
 /// base as an LValue (\p TDBase). Recovers part_id / shareds / privates (and, for
-/// taskloops, the loop bounds) from the base exactly like the classic proxy, then
+/// taskloops, the loop bounds) from the base exactly like the proxy, then
 /// invokes TaskFunction. Shared by the proxy (.omp_task_entry. for tasks kept on
-/// the args[0]==tt ABI) and the leaf kernel (.omp_task_kernel., which builds a
+/// the args[0]==tt ABI) and the unpacked kernel (.omp_task_kernel., which builds a
 /// local base from its individual capture parameters). \p GtidParam is the gtid
 /// value to forward (recorded task bodies replay with gtid 0).
 static void
@@ -3872,34 +3872,28 @@ computeIRClosure(const llvm::Function *Root,
   }
 }
 
-/// Scalarize the cloned task-body closure's leaf \p Entry in place so the
-/// recorded snapshot reaches CGIR's prog-fuse already scalarized -- the same
-/// shape a device kernel has (device IR reaches the runtime post-optimization).
-/// We fold the always-inline task helpers (the outlined region and, at -O>0, the
-/// privates map) into the leaf and SROA it, so its reconstructed local task
-/// struct / shareds / ptmp promote to SSA and the captured values become the
-/// loop base -- which is what lets prog-fuse deduplicate them and fuse the loops.
+/// Scalarize the cloned unpacked-kernel closure \p Entry in place so the recorded
+/// snapshot reaches CGIR's prog-fuse already scalarized (like a device kernel).
+/// Folds the always-inline task helpers (outlined region and, at -O>0, the
+/// privates map) into Entry and SROAs it, so its reconstructed task struct /
+/// shareds / ptmp promote to SSA and the captured values become the loop base --
+/// what lets prog-fuse deduplicate them and fuse the loops.
 ///
-/// This runs DURING clang codegen, so the module still contains INCOMPLETE
-/// functions (e.g. the enclosing function whose body is mid-emission, reachable
-/// from the closure when the task body recurses into it). We therefore MUST NOT
-/// run a whole-module pass (a DominatorTree over a half-built CFG crashes):
-/// inlining is done with the targeted InlineFunction API (always-inline helpers
-/// only, never the enclosing function), and SROA is run on the leaf alone, which
-/// emitTaskUnpackedKernel has fully emitted by now. At -O0 the privates map is
-/// noinline, so it stays a call and the body simply does not loop-fuse -- as
-/// expected.
+/// Runs DURING codegen, so the module still holds INCOMPLETE functions (e.g. the
+/// mid-emission enclosing function, reachable when a task body recurses). Hence
+/// no whole-module pass (a DominatorTree over a half-built CFG crashes): inlining
+/// uses the targeted InlineFunction API (always-inline helpers only, never the
+/// enclosing function), and SROA runs on Entry alone (fully emitted). At -O0 the
+/// privates map stays noinline, so the body simply does not loop-fuse.
 static void optimizeTaskClosure(llvm::Function *Entry) {
   if (!Entry || Entry->isDeclaration())
     return;
 
-  // Force always-inline on the private-map helper(s) in the clone. The frontend
-  // leaves .omp_task_privates_map. noinline unless optimizing, which would keep
-  // it an opaque call in the leaf and prevent SROA from promoting the
-  // reconstructed local privates struct (so each firstprivate would be reloaded
-  // from memory, defeating fusion). Matching by name only touches that per-task
-  // helper -- never the enclosing function -- and only sets attributes (no CFG
-  // walk), so it is safe even though the module still holds incomplete functions.
+  // Force always-inline on the privates-map helper(s): the frontend leaves
+  // .omp_task_privates_map. noinline unless optimizing, which would keep it an
+  // opaque call and stop SROA from promoting the reconstructed privates struct.
+  // Matching by name touches only that per-task helper (never the enclosing fn)
+  // and only sets attributes (no CFG walk), so it is safe here.
   for (llvm::Function &F : *Entry->getParent()) {
     if (F.isDeclaration())
       continue;
@@ -3910,15 +3904,12 @@ static void optimizeTaskClosure(llvm::Function *Entry) {
     }
   }
 
-  // Alternate targeted inlining and SROA to a fixpoint. Each round inlines the
-  // always-inline task helpers that appear as DIRECT calls in the leaf, then
-  // SROAs the leaf. SROA promotes the outlined body's arg allocas, which
-  // devirtualizes its indirect call to the privates map into a direct call --
-  // exposing a new always-inline direct call for the next round -- and finally
-  // promotes the reconstructed local task/privates struct so the loop reads the
-  // leaf parameters directly. We only inline always-inline direct callees (never
-  // the possibly-incomplete enclosing function, which is not always-inline) and
-  // only run function passes on the (complete) leaf, so this stays safe.
+  // Alternate targeted inlining and SROA to a fixpoint: inline the always-inline
+  // helpers called directly in Entry, then SROA it. SROA promotes the outlined
+  // body's arg allocas, devirtualizing its indirect privates-map call into a
+  // direct one (exposing the next round), and finally promotes the reconstructed
+  // struct so the loop reads Entry's parameters directly. Only always-inline
+  // direct callees are inlined (never the incomplete enclosing fn).
   for (unsigned Round = 0; Round < 8; ++Round) {
     bool Inlined = false;
     unsigned Budget = 4096;
@@ -3947,7 +3938,7 @@ static void optimizeTaskClosure(llvm::Function *Entry) {
       }
     }
 
-    // SROA the leaf ONLY (it is complete).
+    // SROA Entry ONLY (it is complete).
     llvm::PassBuilder PB;
     llvm::FunctionAnalysisManager FAM;
     PB.registerFunctionAnalyses(FAM);
@@ -4018,7 +4009,7 @@ serializeClosureToBitcode(CodeGenModule &CGM, llvm::Function *Fn,
     }
   }
 
-  // Scalarize the leaf so the recorded snapshot is directly fusable; done after
+  // Scalarize the entry so the recorded snapshot is directly fusable; done after
   // externalizing the entry/globals so those references are preserved.
   if (OptimizeClone)
     optimizeTaskClosure(ClonedEntry);
@@ -4054,7 +4045,7 @@ emitTaskSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
 
   llvm::SmallString<4096> Buffer;
   llvm::SmallVector<llvm::GlobalVariable *, 8> Externs;
-  // Optimize (scalarize) the closure so a leaf task body is recorded in a
+  // Optimize (scalarize) the closure so an unpacked task body is recorded in a
   // directly-fusable form; see optimizeTaskClosure.
   if (!serializeClosureToBitcode(CGM, Fn, Buffer, &Externs, /*OptimizeClone=*/true))
     return {NullPtr, Zero, NullPtr, Zero};
@@ -4139,43 +4130,43 @@ emitTargetKernelSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
   llvm::appendToUsed(M, {GV});
 }
 
-// One capture exposed as a parameter of a leaf-form task. The leaf takes one
+// One capture exposed as a parameter of an unpacked task. The kernel takes one
 // value parameter per capture; `Ty` is that parameter's type. `Field` is the
 // record field the value lives in (the privates record for FIRSTPRIVATE, the
 // shareds record for SHARED_*). The three kinds differ in how the scatter forms
-// the &value slot and how the leaf feeds the value back to the outlined body:
+// the &value slot and how the kernel feeds the value back to the outlined body:
 //
 //   FIRSTPRIVATE : privates.<field> holds the copied value.
-//                  scatter: &privates.<field>;   leaf: privates.<field> = param.
+//                  scatter: &privates.<field>;   kernel: privates.<field> = param.
 //   SHARED_ADDR  : an array/scalar/struct captured by-ref; shareds.<field> holds
 //                  the base/address the body uses directly (one load).
-//                  scatter: &shareds.<field>;    leaf: shareds.<field> = param.
+//                  scatter: &shareds.<field>;    kernel: shareds.<field> = param.
 //   SHARED_PTR   : a pointer variable captured by-ref; shareds.<field> holds
 //                  &p, and the body loads it twice to reach the pointer value.
 //                  scatter: load(&shareds.<field>) (== &p);
-//                  leaf: ptmp = param; shareds.<field> = &ptmp.
+//                  kernel: ptmp = param; shareds.<field> = &ptmp.
 //
-// For all three, the loop's base ends up equal to the leaf parameter (after
+// For all three, the loop's base ends up equal to the kernel parameter (after
 // SROA), so prog-fuse can deduplicate it across fused bodies and fuse the loops.
 namespace {
 struct TaskUnpackedCapture {
   enum CaptureKind { FIRSTPRIVATE, SHARED_ADDR, SHARED_PTR } Kind;
   const FieldDecl *Field; // privates field (FIRSTPRIVATE) or shareds field (SHARED_*)
-  QualType Ty;            // the leaf parameter type
+  QualType Ty;            // the unpacked parameter type
 };
 } // namespace
 
-/// Decide whether a task can be emitted in the fusable "leaf-kernel" form and,
+/// Decide whether a task can be emitted in the fusable "unpacked-kernel" form and,
 /// if so, collect its captures. Eligible iff it is a plain, tied `#pragma omp
 /// task` (no taskloop/target/reduction/lastprivate/detach, trivially-copyable
 /// firstprivates with no destructors) whose captures are all firstprivate
 /// scalars and/or shared by-ref variables (arrays/pointers/scalars/structs).
 /// Such a body reaches its captured data only through those parameters (plus
-/// globals), so it can be outlined as a leaf kernel taking one value parameter
+/// globals), so it can be outlined as an unpacked kernel taking one value parameter
 /// per capture -- which is what lets CGIR's prog-fuse pass deduplicate the
 /// captured values across consecutive task bodies and fuse their loops. A task
 /// using only globals (no captures) is eligible with an empty capture list.
-/// Returns false (keeping the classic args[0]==tt body) for anything else.
+/// Returns false (keeping the packed args[0]==tt kernel) for anything else.
 static bool collectTaskUnpackedCaptures(CodeGenFunction &CGF,
                                     const OMPExecutableDirective &D,
                                     const OMPTaskDataTy &Data,
@@ -4198,7 +4189,7 @@ static bool collectTaskUnpackedCaptures(CodeGenFunction &CGF,
 
   // Firstprivate parameters: the firstprivate entries of the privates record (in
   // Privates order). Bail on a firstprivate aggregate/array. Private (non-first)
-  // locals stay uninitialized in the leaf's local privates (matching normal task
+  // locals stay uninitialized in the kernel's local privates (matching normal task
   // semantics) and need no parameter.
   llvm::SmallPtrSet<const VarDecl *, 8> FP;
   for (const Expr *E : Data.FirstprivateVars)
@@ -4240,7 +4231,7 @@ static bool collectTaskUnpackedCaptures(CodeGenFunction &CGF,
   return true;
 }
 
-/// Emit the fusable leaf kernel for a leaf-eligible task:
+/// Emit the fusable unpacked kernel for an unpacked-eligible task:
 ///   void .omp_task_kernel.(<cap0>, <cap1>, ...)
 /// It rebuilds a local KmpTaskTWithPrivates (and, if there are shared captures, a
 /// local shareds record) from its parameters and runs the SAME outlined body via
@@ -4287,13 +4278,13 @@ emitTaskUnpackedKernel(CodeGenModule &CGM, SourceLocation Loc,
 
   // Local KmpTaskTWithPrivates base (+ a local shareds record if needed), built
   // from the parameters.
-  Address TL = CGF.CreateMemTemp(KmpTaskTWithPrivatesQTy, "task.leaf");
+  Address TL = CGF.CreateMemTemp(KmpTaskTWithPrivatesQTy, "task.unpacked");
   LValue TDBase = CGF.MakeAddrLValue(TL, KmpTaskTWithPrivatesQTy);
   LValue TaskData = CGF.EmitLValueForField(TDBase, *WithPrivRD->field_begin());
 
   Address SL = Address::invalid();
   if (HasShared)
-    SL = CGF.CreateMemTemp(SharedsTy, "shareds.leaf");
+    SL = CGF.CreateMemTemp(SharedsTy, "shareds.unpacked");
   // task_data.shareds = &SL (or null when there are no shared captures)
   CGF.EmitStoreOfScalar(
       HasShared ? CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
@@ -4348,9 +4339,9 @@ emitTaskUnpackedKernel(CodeGenModule &CGM, SourceLocation Loc,
   return Fn;
 }
 
-/// Emit the scatter helper for a leaf-eligible task:
+/// Emit the scatter helper for an unpacked-eligible task:
 ///   void .omp_task_scatter.(kmp_task_t *tt, void **out)
-/// filling out[k] with the &value slot the leaf's k-th parameter is loaded from
+/// filling out[k] with the &value slot the kernel's k-th parameter is loaded from
 /// (see TaskUnpackedCapture): &tt->privates.<f> for firstprivate, &shareds-><f> for
 /// a shared array/scalar/struct, and shareds-><f> (== &p) for a shared pointer.
 /// The runtime calls this once right after allocation to populate the task's
@@ -4431,7 +4422,7 @@ static llvm::Function *emitTaskUnpackedScatter(CodeGenModule &CGM, SourceLocatio
       V = CGF.EmitLValueForField(SharedsBase, Cap.Field).getPointer(CGF);
       break;
     case TaskUnpackedCapture::SHARED_PTR:
-      // the field value is &p; its deref is the pointer the leaf param wants
+      // the field value is &p; its deref is the pointer the kernel param wants
       V = CGF.EmitLoadOfScalar(CGF.EmitLValueForField(SharedsBase, Cap.Field),
                                Loc);
       break;
@@ -4543,7 +4534,7 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
         cast<llvm::PointerType>(TaskPrivatesMapTy));
   }
   // Do we need destructors for the private copies?  (computed here so the
-  // leaf-form eligibility below can see it; reused for the task flags.)
+  // unpacked-form eligibility below can see it; reused for the task flags.)
   bool NeedsCleanup = false;
   if (!Privates.empty())
     NeedsCleanup =
