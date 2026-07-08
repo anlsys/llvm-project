@@ -3879,41 +3879,71 @@ static void optimizeTaskClosure(llvm::Function *Entry) {
   if (!Entry || Entry->isDeclaration())
     return;
 
-  // Inline the always-inline helpers into the leaf (targeted; never touches the
-  // possibly-incomplete enclosing function, which is not always-inline).
-  unsigned Budget = 4096;
-  bool Changed = true;
-  while (Changed && Budget) {
-    Changed = false;
-    for (llvm::BasicBlock &BB : *Entry) {
-      for (llvm::Instruction &I : BB) {
-        auto *CI = llvm::dyn_cast<llvm::CallInst>(&I);
-        if (!CI)
-          continue;
-        llvm::Function *Callee = CI->getCalledFunction();
-        if (!Callee || Callee->isDeclaration() || Callee == Entry ||
-            !Callee->hasFnAttribute(llvm::Attribute::AlwaysInline))
-          continue;
-        llvm::InlineFunctionInfo IFI;
-        if (llvm::InlineFunction(*CI, IFI).isSuccess()) {
-          --Budget;
-          Changed = true;
-          break; // iterators invalidated: restart the scan
-        }
-      }
-      if (Changed)
-        break;
+  // Force always-inline on the private-map helper(s) in the clone. The frontend
+  // leaves .omp_task_privates_map. noinline unless optimizing, which would keep
+  // it an opaque call in the leaf and prevent SROA from promoting the
+  // reconstructed local privates struct (so each firstprivate would be reloaded
+  // from memory, defeating fusion). Matching by name only touches that per-task
+  // helper -- never the enclosing function -- and only sets attributes (no CFG
+  // walk), so it is safe even though the module still holds incomplete functions.
+  for (llvm::Function &F : *Entry->getParent()) {
+    if (F.isDeclaration())
+      continue;
+    if (F.getName().contains(".omp_task_privates_map.")) {
+      F.removeFnAttr(llvm::Attribute::NoInline);
+      F.removeFnAttr(llvm::Attribute::OptimizeNone);
+      F.addFnAttr(llvm::Attribute::AlwaysInline);
     }
   }
 
-  // SROA the leaf ONLY (it is complete). This promotes the reconstructed local
-  // task struct / shareds record / ptmp (and the loop induction var) to SSA.
-  llvm::PassBuilder PB;
-  llvm::FunctionAnalysisManager FAM;
-  PB.registerFunctionAnalyses(FAM);
-  llvm::FunctionPassManager FPM;
-  FPM.addPass(llvm::SROAPass(llvm::SROAOptions(llvm::SROAOptions::ModifyCFG)));
-  FPM.run(*Entry, FAM);
+  // Alternate targeted inlining and SROA to a fixpoint. Each round inlines the
+  // always-inline task helpers that appear as DIRECT calls in the leaf, then
+  // SROAs the leaf. SROA promotes the outlined body's arg allocas, which
+  // devirtualizes its indirect call to the privates map into a direct call --
+  // exposing a new always-inline direct call for the next round -- and finally
+  // promotes the reconstructed local task/privates struct so the loop reads the
+  // leaf parameters directly. We only inline always-inline direct callees (never
+  // the possibly-incomplete enclosing function, which is not always-inline) and
+  // only run function passes on the (complete) leaf, so this stays safe.
+  for (unsigned Round = 0; Round < 8; ++Round) {
+    bool Inlined = false;
+    unsigned Budget = 4096;
+    bool Changed = true;
+    while (Changed && Budget) {
+      Changed = false;
+      for (llvm::BasicBlock &BB : *Entry) {
+        for (llvm::Instruction &I : BB) {
+          auto *CI = llvm::dyn_cast<llvm::CallInst>(&I);
+          if (!CI)
+            continue;
+          llvm::Function *Callee = CI->getCalledFunction();
+          if (!Callee || Callee->isDeclaration() || Callee == Entry ||
+              !Callee->hasFnAttribute(llvm::Attribute::AlwaysInline))
+            continue;
+          llvm::InlineFunctionInfo IFI;
+          if (llvm::InlineFunction(*CI, IFI).isSuccess()) {
+            --Budget;
+            Changed = true;
+            Inlined = true;
+            break; // iterators invalidated: restart the scan
+          }
+        }
+        if (Changed)
+          break;
+      }
+    }
+
+    // SROA the leaf ONLY (it is complete).
+    llvm::PassBuilder PB;
+    llvm::FunctionAnalysisManager FAM;
+    PB.registerFunctionAnalyses(FAM);
+    llvm::FunctionPassManager FPM;
+    FPM.addPass(llvm::SROAPass(llvm::SROAOptions(llvm::SROAOptions::ModifyCFG)));
+    FPM.run(*Entry, FAM);
+
+    if (!Inlined)
+      break;
+  }
 }
 
 /// Serialize the closure of \p Fn (see computeIRClosure) to LLVM bitcode in
@@ -4572,18 +4602,8 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
   llvm::Function *LeafKernel = nullptr;
   llvm::Function *ScatterFn = nullptr;
   if (LeafForm) {
-    // Force the privates map always-inline so optimizeTaskClosure folds it into
-    // the leaf and SROA can promote the reconstructed local privates struct to
-    // the leaf's parameters (otherwise, when the frontend leaves the map
-    // noinline, the leaf reloads each firstprivate from local memory and the
-    // fused bodies keep distinct SSA values, defeating loop fusion). Safe: the
-    // map is a per-task helper (it never inlines the enclosing function).
-    if (auto *PM = llvm::dyn_cast_or_null<llvm::Function>(
-            TaskPrivatesMap->stripPointerCasts())) {
-      PM->removeFnAttr(llvm::Attribute::NoInline);
-      PM->removeFnAttr(llvm::Attribute::OptimizeNone);
-      PM->addFnAttr(llvm::Attribute::AlwaysInline);
-    }
+    // (The task's .omp_task_privates_map. is force-inlined into the leaf later,
+    // in optimizeTaskClosure, so the reconstructed privates struct scalarizes.)
     LeafKernel = emitTaskLeafKernel(CGM, Loc, D.getDirectiveKind(),
                                     KmpTaskTWithPrivatesQTy, KmpTaskTQTy, SharedsTy,
                                     SharedsPtrTy, TaskFunction, TaskPrivatesMap,
