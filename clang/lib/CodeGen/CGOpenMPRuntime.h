@@ -570,7 +570,7 @@ protected:
     llvm::Value *NewTaskNewTaskTTy = nullptr;
     LValue TDBase;
     const RecordDecl *KmpTaskTQTyRD = nullptr;
-    llvm::Function *TaskDupFn = nullptr;
+    llvm::Value *TaskDupFn = nullptr;
   };
   /// Emit task region for the task directive. The task region is emitted in
   /// several steps:

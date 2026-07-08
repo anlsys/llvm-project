@@ -5653,7 +5653,7 @@ void CGOpenMPRuntime::emitTaskCall(CodeGenFunction &CGF, SourceLocation Loc,
   }
   auto &M = CGM.getModule();
   auto &&ElseCodeGen = [this, &M, &TaskArgs, &Result, NewTaskNewTaskTTy,
-                        TaskEntry, &DepWaitTaskArgs, UseV2Wait,
+                        TaskEntry, ThreadID, &DepWaitTaskArgs, UseV2Wait,
                         HasDepsOrAccesses, Loc](CodeGenFunction &CGF, PrePostActionTy &) {
     CodeGenFunction::RunCleanupsScope LocalScope(CGF);
     // Wait on deps and/or accesses before inlining the task body.
