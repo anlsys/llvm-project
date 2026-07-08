@@ -564,18 +564,13 @@ protected:
 
   struct TaskResultTy {
     llvm::Value *NewTask = nullptr;
+    // The task's ahead-of-time routine, the standard libomp proxy
+    // kmp_int32 .omp_task_entry.(kmp_int32 gtid, kmp_task_t *tt).
     llvm::Function *TaskEntry = nullptr;
     llvm::Value *NewTaskNewTaskTTy = nullptr;
     LValue TDBase;
     const RecordDecl *KmpTaskTQTyRD = nullptr;
-    llvm::Value *TaskDupFn = nullptr;
-    // Leaf-kernel form (fusable plain task): when TaskScatter is non-null,
-    // TaskEntry is the void(void**) trampoline over the leaf .omp_task_kernel.,
-    // and the runtime's args array holds LeafNArgs &value slots (one per
-    // firstprivate scalar capture) filled by TaskScatter(kmp_task_t*, void**).
-    // Null/0 for the classic args[0]==tt body.
-    llvm::Function *TaskScatter = nullptr;
-    unsigned LeafNArgs = 0;
+    llvm::Function *TaskDupFn = nullptr;
   };
   /// Emit task region for the task directive. The task region is emitted in
   /// several steps:
