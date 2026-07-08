@@ -569,6 +569,13 @@ protected:
     LValue TDBase;
     const RecordDecl *KmpTaskTQTyRD = nullptr;
     llvm::Value *TaskDupFn = nullptr;
+    // Leaf-kernel form (fusable plain task): when TaskScatter is non-null,
+    // TaskEntry is the void(void**) trampoline over the leaf .omp_task_kernel.,
+    // and the runtime's args array holds LeafNArgs &value slots (one per
+    // firstprivate scalar capture) filled by TaskScatter(kmp_task_t*, void**).
+    // Null/0 for the classic args[0]==tt body.
+    llvm::Function *TaskScatter = nullptr;
+    unsigned LeafNArgs = 0;
   };
   /// Emit task region for the task directive. The task region is emitted in
   /// several steps:
