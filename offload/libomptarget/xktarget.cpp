@@ -333,13 +333,14 @@ __xktgt_target_kernel_launch(
     __xktgt_get_kernel_ir(*GenericPlugin, GenericDevice, GenericKernel, KernelIR, KernelIRSize);
 
     const auto builder = [&] (command_t * cmd) {
-        // CGIR's uniform variadic launch form: `args` is the kernelParams array
-        // (LaunchParams.Ptrs -- one pointer per kernel parameter), `n_args` its
-        // count. `fn` carries the device kernel handle in the void(void**) fn
+        // CGIR's uniform VARIADIC launch form: `prog.args` is the kernelParams
+        // array (LaunchParams.Ptrs -- one pointer per kernel parameter), `n_args`
+        // its count. `fn` carries the device kernel handle in the void(void**) fn
         // slot (function<->object pointer reinterpret is POSIX-safe).
+        cmd->prog.prototype                = cgir::CGIR_COMMAND_PROG_FUNCTION_PROTOTYPE_VARIADIC;
         cmd->prog.launcher.variadic.fn     = reinterpret_cast<void (*)(void **)>(GenericKernel.Func);
-        cmd->prog.launcher.variadic.args   = LaunchParams.Ptrs;
-        cmd->prog.launcher.variadic.n_args = LaunchParams.Size / sizeof(void *);
+        cmd->prog.args                     = LaunchParams.Ptrs;
+        cmd->prog.n_args                   = LaunchParams.Size / sizeof(void *);
         cmd->prog.source.type                 = cgir::COMMAND_PROG_SOURCE_TYPE_LLVMIR;
         cmd->prog.source.content.llvmir.raw    = KernelIR;
         cmd->prog.source.content.llvmir.size   = KernelIRSize;
@@ -378,8 +379,8 @@ __xktgt_target_kernel_launch(
             for (size_t i = 0 ; i < n_args ; ++i)
                 dup_ptrs[i] = &dup_vals[i];
 
-            command->prog.launcher.variadic.args   = dup_ptrs;
-            command->prog.launcher.variadic.n_args = n_args;
+            command->prog.args   = dup_ptrs;
+            command->prog.n_args = n_args;
 
             // TODO: reenable this free, but gotta find a way to handle replay in TDG
             // (must free both dup_ptrs and dup_vals). Currently leaked.
@@ -404,7 +405,7 @@ __xktgt_target_kernel_launch(
         constexpr command_flag_t flags = COMMAND_FLAG_SERIALIZED | COMMAND_FLAG_SYNCHRONOUS;
         command_t command(ctype, flags);
         builder(&command);
-        command.prog.launcher.variadic.args = LaunchParams.Ptrs;   // n_args set by builder
+        command.prog.args = LaunchParams.Ptrs;   // n_args set by builder
         xkomp->runtime.command_submit(device_unique_id, &command);
     }
 
