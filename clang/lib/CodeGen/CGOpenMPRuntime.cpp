@@ -4068,28 +4068,43 @@ emitTargetKernelSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
   llvm::appendToUsed(M, {GV});
 }
 
-// One firstprivate scalar capture of a leaf-form task: its index in the privates
-// record (== index in the sorted Privates list) and the (scalar value) type,
-// which is both the leaf parameter type and the frozen storage type the scatter
-// takes the address of.
+// One capture exposed as a parameter of a leaf-form task. The leaf takes one
+// value parameter per capture; `Ty` is that parameter's type. `Field` is the
+// record field the value lives in (the privates record for FIRSTPRIVATE, the
+// shareds record for SHARED_*). The three kinds differ in how the scatter forms
+// the &value slot and how the leaf feeds the value back to the outlined body:
+//
+//   FIRSTPRIVATE : privates.<field> holds the copied value.
+//                  scatter: &privates.<field>;   leaf: privates.<field> = param.
+//   SHARED_ADDR  : an array/scalar/struct captured by-ref; shareds.<field> holds
+//                  the base/address the body uses directly (one load).
+//                  scatter: &shareds.<field>;    leaf: shareds.<field> = param.
+//   SHARED_PTR   : a pointer variable captured by-ref; shareds.<field> holds
+//                  &p, and the body loads it twice to reach the pointer value.
+//                  scatter: load(&shareds.<field>) (== &p);
+//                  leaf: ptmp = param; shareds.<field> = &ptmp.
+//
+// For all three, the loop's base ends up equal to the leaf parameter (after
+// SROA), so prog-fuse can deduplicate it across fused bodies and fuse the loops.
 namespace {
 struct TaskLeafCapture {
-  unsigned PrivFieldIdx;
-  QualType Ty;
+  enum CaptureKind { FIRSTPRIVATE, SHARED_ADDR, SHARED_PTR } Kind;
+  const FieldDecl *Field; // privates field (FIRSTPRIVATE) or shareds field (SHARED_*)
+  QualType Ty;            // the leaf parameter type
 };
 } // namespace
 
 /// Decide whether a task can be emitted in the fusable "leaf-kernel" form and,
 /// if so, collect its captures. Eligible iff it is a plain, tied `#pragma omp
-/// task` whose EVERY capture is a firstprivate scalar (no shared/by-ref
-/// captures, no lastprivate/reduction/detach, trivially-copyable firstprivates
-/// with no destructors). Such a body reaches its captured data only through
-/// those scalars (plus globals), so it can be outlined as a leaf kernel taking
-/// one value parameter per capture -- which is what lets CGIR's prog-fuse pass
-/// deduplicate the captured scalars across consecutive task bodies and fuse
-/// their loops. A task using only globals (no captures) is eligible with an
-/// empty capture list. Returns false (keeping the classic args[0]==tt body) for
-/// anything outside this conservative subset.
+/// task` (no taskloop/target/reduction/lastprivate/detach, trivially-copyable
+/// firstprivates with no destructors) whose captures are all firstprivate
+/// scalars and/or shared by-ref variables (arrays/pointers/scalars/structs).
+/// Such a body reaches its captured data only through those parameters (plus
+/// globals), so it can be outlined as a leaf kernel taking one value parameter
+/// per capture -- which is what lets CGIR's prog-fuse pass deduplicate the
+/// captured values across consecutive task bodies and fuse their loops. A task
+/// using only globals (no captures) is eligible with an empty capture list.
+/// Returns false (keeping the classic args[0]==tt body) for anything else.
 static bool collectTaskLeafCaptures(CodeGenFunction &CGF,
                                     const OMPExecutableDirective &D,
                                     const OMPTaskDataTy &Data,
@@ -4110,60 +4125,75 @@ static bool collectTaskLeafCaptures(CodeGenFunction &CGF,
   if (NeedsCleanup || checkInitIsRequired(CGF, Privates))
     return false;
 
-  // Gate on "no shared/by-ref captures". CS->captures() is the SHAREDS list:
-  // firstprivate scalars are NOT in it -- they are initialized into the privates
-  // area from the original at task creation (emitPrivatesInit reads OriginalRef),
-  // so the shareds list holds only the by-ref (shared) variables. We therefore
-  // require every capture to be a firstprivate (there are no shared captures);
-  // `this`/VLA captures are also rejected. A task with only globals + firstprivate
-  // scalars has an EMPTY capture list and is eligible.
-  const CapturedStmt *CS = D.getCapturedStmt(OMPD_task);
+  // Firstprivate parameters: the firstprivate entries of the privates record (in
+  // Privates order). Bail on a firstprivate aggregate/array. Private (non-first)
+  // locals stay uninitialized in the leaf's local privates (matching normal task
+  // semantics) and need no parameter.
   llvm::SmallPtrSet<const VarDecl *, 8> FP;
   for (const Expr *E : Data.FirstprivateVars)
     FP.insert(
         cast<VarDecl>(cast<DeclRefExpr>(E)->getDecl())->getCanonicalDecl());
-  for (const CapturedStmt::Capture &Cap : CS->captures()) {
-    if (!Cap.capturesVariable() && !Cap.capturesVariableByCopy())
-      return false; // this / VLA / etc.
-    if (!FP.count(Cap.getCapturedVar()->getCanonicalDecl()))
-      return false; // a shared/by-ref capture -> not leaf-eligible (yet)
-  }
-
-  // The leaf parameters are the firstprivate scalars, taken from the privates
-  // record in Privates order. Bail on a firstprivate aggregate/array. Private
-  // (non-first) locals stay uninitialized in the leaf's local privates (matching
-  // normal task semantics) and need no parameter.
   unsigned Idx = 0;
   for (const PrivateDataTy &Pair : Privates) {
     if (Pair.second.PrivateElemInit) { // firstprivate
       assert(PrivatesRD && "firstprivate without a privates record");
-      QualType FTy = std::next(PrivatesRD->field_begin(), Idx)->getType();
-      if (!FTy->isScalarType())
+      const FieldDecl *FD = *std::next(PrivatesRD->field_begin(), Idx);
+      if (!FD->getType()->isScalarType())
         return false;
-      Out.push_back({Idx, FTy});
+      Out.push_back({TaskLeafCapture::FIRSTPRIVATE, FD, FD->getType()});
     }
     ++Idx;
+  }
+
+  // Shared parameters: the by-ref captures (CS->captures() minus the
+  // firstprivates). Each maps to a shareds-record field (a pointer). A pointer
+  // variable needs the double-load handling (SHARED_PTR); everything else
+  // (arrays/scalars/structs) is reached with one load (SHARED_ADDR). Reject
+  // `this`/VLA captures and any non-pointer (by-value) capture field.
+  const CapturedStmt *CS = D.getCapturedStmt(OMPD_task);
+  CodeGenFunction::CGCapturedStmtInfo CapturesInfo(*CS);
+  for (const CapturedStmt::Capture &Cap : CS->captures()) {
+    if (!Cap.capturesVariable() && !Cap.capturesVariableByCopy())
+      return false; // this / VLA / etc.
+    const VarDecl *VD = Cap.getCapturedVar();
+    if (FP.count(VD->getCanonicalDecl()))
+      continue; // a firstprivate that is also captured -> handled above
+    const FieldDecl *FD = CapturesInfo.lookup(VD);
+    if (!FD || !FD->getType()->isPointerType())
+      return false; // unexpected / by-value capture
+    if (VD->getType()->isPointerType())
+      Out.push_back({TaskLeafCapture::SHARED_PTR, FD, VD->getType()});
+    else
+      Out.push_back({TaskLeafCapture::SHARED_ADDR, FD, FD->getType()});
   }
   return true;
 }
 
 /// Emit the fusable leaf kernel for a leaf-eligible task:
-///   void .omp_task_kernel.(<fp0>, <fp1>, ...)
-/// It rebuilds a local KmpTaskTWithPrivates from its parameters (privates filled
-/// from the params; shareds = null; part_id = 0) and runs the SAME outlined body
-/// via emitOutlinedTaskCall. After inlining + SROA (in CGIR's prog-fuse/jit O3
-/// pipeline) the local promotes away and the loop reads the parameter SSA values
-/// directly, so prog-fuse can align/deduplicate the captured scalars across
-/// fused bodies and fuse the loops.
+///   void .omp_task_kernel.(<cap0>, <cap1>, ...)
+/// It rebuilds a local KmpTaskTWithPrivates (and, if there are shared captures, a
+/// local shareds record) from its parameters and runs the SAME outlined body via
+/// emitOutlinedTaskCall. After inlining + SROA (in CGIR's prog-fuse/jit O3
+/// pipeline) the locals promote away and the loop reads the parameter SSA values
+/// directly, so prog-fuse can align/deduplicate the captured values across fused
+/// bodies and fuse the loops. See TaskLeafCapture for how each kind is fed back.
 static llvm::Function *
 emitTaskLeafKernel(CodeGenModule &CGM, SourceLocation Loc,
                    OpenMPDirectiveKind Kind, QualType KmpTaskTWithPrivatesQTy,
-                   QualType KmpTaskTQTy, QualType SharedsPtrTy,
+                   QualType KmpTaskTQTy, QualType SharedsTy, QualType SharedsPtrTy,
                    llvm::Function *TaskFunction, llvm::Value *TaskPrivatesMap,
                    ArrayRef<TaskLeafCapture> Caps) {
   ASTContext &C = CGM.getContext();
   const auto *WithPrivRD = KmpTaskTWithPrivatesQTy->castAsRecordDecl();
   const auto *KmpTaskTQTyRD = KmpTaskTQTy->castAsRecordDecl();
+
+  bool HasShared = false, HasFirstprivate = false;
+  for (const TaskLeafCapture &Cap : Caps) {
+    if (Cap.Kind == TaskLeafCapture::FIRSTPRIVATE)
+      HasFirstprivate = true;
+    else
+      HasShared = true;
+  }
 
   FunctionArgList Args;
   SmallVector<const VarDecl *, 8> ParamDecls;
@@ -4184,13 +4214,20 @@ emitTaskLeafKernel(CodeGenModule &CGM, SourceLocation Loc,
   CodeGenFunction CGF(CGM);
   CGF.StartFunction(GlobalDecl(), C.VoidTy, Fn, FnInfo, Args, Loc, Loc);
 
-  // Local KmpTaskTWithPrivates base, populated from the parameters.
+  // Local KmpTaskTWithPrivates base (+ a local shareds record if needed), built
+  // from the parameters.
   Address TL = CGF.CreateMemTemp(KmpTaskTWithPrivatesQTy, "task.leaf");
   LValue TDBase = CGF.MakeAddrLValue(TL, KmpTaskTWithPrivatesQTy);
   LValue TaskData = CGF.EmitLValueForField(TDBase, *WithPrivRD->field_begin());
-  // shareds = null (a leaf-eligible task has no shared/by-ref captures)
+
+  Address SL = Address::invalid();
+  if (HasShared)
+    SL = CGF.CreateMemTemp(SharedsTy, "shareds.leaf");
+  // task_data.shareds = &SL (or null when there are no shared captures)
   CGF.EmitStoreOfScalar(
-      llvm::ConstantPointerNull::get(CGF.VoidPtrTy),
+      HasShared ? CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
+                      SL.emitRawPointer(CGF), CGF.VoidPtrTy)
+                : llvm::ConstantPointerNull::get(CGF.VoidPtrTy),
       CGF.EmitLValueForField(
           TaskData, *std::next(KmpTaskTQTyRD->field_begin(), KmpTaskTShareds)));
   // part_id = 0
@@ -4198,18 +4235,38 @@ emitTaskLeafKernel(CodeGenModule &CGM, SourceLocation Loc,
       llvm::ConstantInt::get(CGF.Int32Ty, 0),
       CGF.EmitLValueForField(
           TaskData, *std::next(KmpTaskTQTyRD->field_begin(), KmpTaskTPartId)));
-  // privates.<field_k> = param_k
-  if (!Caps.empty()) {
-    auto PrivFI = std::next(WithPrivRD->field_begin(), 1);
-    LValue PrivBase = CGF.EmitLValueForField(TDBase, *PrivFI);
-    const auto *PrivatesRD = PrivFI->getType()->castAsRecordDecl();
-    for (unsigned k = 0, e = Caps.size(); k < e; ++k) {
-      LValue Field = CGF.EmitLValueForField(
-          PrivBase, *std::next(PrivatesRD->field_begin(), Caps[k].PrivFieldIdx));
-      llvm::Value *Val = CGF.EmitLoadOfScalar(
-          CGF.MakeAddrLValue(CGF.GetAddrOfLocalVar(ParamDecls[k]), Caps[k].Ty),
-          Loc);
-      CGF.EmitStoreOfScalar(Val, Field);
+
+  LValue PrivBase;
+  if (HasFirstprivate)
+    PrivBase = CGF.EmitLValueForField(TDBase, *std::next(WithPrivRD->field_begin(), 1));
+  LValue SLBase;
+  if (HasShared)
+    SLBase = CGF.MakeAddrLValue(SL, SharedsTy);
+
+  for (unsigned k = 0, e = Caps.size(); k < e; ++k) {
+    const TaskLeafCapture &Cap = Caps[k];
+    llvm::Value *Val = CGF.EmitLoadOfScalar(
+        CGF.MakeAddrLValue(CGF.GetAddrOfLocalVar(ParamDecls[k]), Cap.Ty), Loc);
+    switch (Cap.Kind) {
+    case TaskLeafCapture::FIRSTPRIVATE:
+      CGF.EmitStoreOfScalar(Val, CGF.EmitLValueForField(PrivBase, Cap.Field));
+      break;
+    case TaskLeafCapture::SHARED_ADDR:
+      CGF.EmitStoreOfScalar(Val, CGF.EmitLValueForField(SLBase, Cap.Field));
+      break;
+    case TaskLeafCapture::SHARED_PTR: {
+      // ptmp = param; shareds.<field> = &ptmp, so the outlined body's double
+      // load (&p -> p) yields the parameter. SROA promotes ptmp once SL is
+      // scalarized, leaving the loop base == the parameter.
+      Address PTmp = CGF.CreateMemTemp(Cap.Ty, "shared.ptr");
+      CGF.EmitStoreOfScalar(Val, CGF.MakeAddrLValue(PTmp, Cap.Ty));
+      CGF.EmitStoreOfScalar(
+          CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
+              PTmp.emitRawPointer(CGF),
+              CGF.ConvertTypeForMem(Cap.Field->getType())),
+          CGF.EmitLValueForField(SLBase, Cap.Field));
+      break;
+    }
     }
   }
 
@@ -4222,17 +4279,31 @@ emitTaskLeafKernel(CodeGenModule &CGM, SourceLocation Loc,
 
 /// Emit the scatter helper for a leaf-eligible task:
 ///   void .omp_task_scatter.(kmp_task_t *tt, void **out)
-/// filling out[k] = &tt->privates.<fp field k>. The runtime calls this once,
-/// right after allocation, to populate the task's stable args array with the
-/// addresses of the frozen firstprivate values, so the recorded PROG's args are
-/// the per-value slots prog-fuse needs (args[k] == &value).
+/// filling out[k] with the &value slot the leaf's k-th parameter is loaded from
+/// (see TaskLeafCapture): &tt->privates.<f> for firstprivate, &shareds-><f> for
+/// a shared array/scalar/struct, and shareds-><f> (== &p) for a shared pointer.
+/// The runtime calls this once right after allocation to populate the task's
+/// stable args array, so the recorded PROG's args are the per-value slots
+/// prog-fuse needs (args[k] == &value).
 static llvm::Function *emitTaskLeafScatter(CodeGenModule &CGM, SourceLocation Loc,
                                            QualType KmpTaskTWithPrivatesQTy,
+                                           QualType KmpTaskTQTy,
+                                           QualType SharedsTy,
+                                           QualType SharedsPtrTy,
                                            ArrayRef<TaskLeafCapture> Caps) {
   ASTContext &C = CGM.getContext();
   const auto *WithPrivRD = KmpTaskTWithPrivatesQTy->castAsRecordDecl();
+  const auto *KmpTaskTQTyRD = KmpTaskTQTy->castAsRecordDecl();
   QualType WithPrivPtrQTy = C.getPointerType(KmpTaskTWithPrivatesQTy);
   QualType VoidPtrPtrTy = C.getPointerType(C.VoidPtrTy);
+
+  bool HasShared = false, HasFirstprivate = false;
+  for (const TaskLeafCapture &Cap : Caps) {
+    if (Cap.Kind == TaskLeafCapture::FIRSTPRIVATE)
+      HasFirstprivate = true;
+    else
+      HasShared = true;
+  }
 
   auto *BaseArg = ImplicitParamDecl::Create(
       C, /*DC=*/nullptr, Loc, /*Id=*/nullptr, C.VoidPtrTy,
@@ -4261,20 +4332,44 @@ static llvm::Function *emitTaskLeafScatter(CodeGenModule &CGM, SourceLocation Lo
       TTAddr);
   LValue TDBase =
       CGF.EmitLoadOfPointerLValue(TTAddr, WithPrivPtrQTy->castAs<PointerType>());
+  LValue TaskData = CGF.EmitLValueForField(TDBase, *WithPrivRD->field_begin());
+
+  LValue PrivBase;
+  if (HasFirstprivate)
+    PrivBase = CGF.EmitLValueForField(TDBase, *std::next(WithPrivRD->field_begin(), 1));
+  LValue SharedsBase;
+  if (HasShared) {
+    llvm::Value *SharedsVoid = CGF.EmitLoadOfScalar(
+        CGF.EmitLValueForField(
+            TaskData, *std::next(KmpTaskTQTyRD->field_begin(), KmpTaskTShareds)),
+        Loc);
+    llvm::Value *SharedsPtr = CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
+        SharedsVoid, CGF.ConvertTypeForMem(SharedsPtrTy));
+    SharedsBase = CGF.MakeNaturalAlignAddrLValue(SharedsPtr, SharedsTy);
+  }
+
   llvm::Value *OutPtr = CGF.Builder.CreateLoad(CGF.GetAddrOfLocalVar(OutArg));
-  if (!Caps.empty()) {
-    auto PrivFI = std::next(WithPrivRD->field_begin(), 1);
-    LValue PrivBase = CGF.EmitLValueForField(TDBase, *PrivFI);
-    const auto *PrivatesRD = PrivFI->getType()->castAsRecordDecl();
-    for (unsigned k = 0, e = Caps.size(); k < e; ++k) {
-      LValue Field = CGF.EmitLValueForField(
-          PrivBase, *std::next(PrivatesRD->field_begin(), Caps[k].PrivFieldIdx));
-      llvm::Value *Addr = CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
-          Field.getPointer(CGF), CGF.VoidPtrTy);
-      llvm::Value *Slot =
-          CGF.Builder.CreateConstInBoundsGEP1_64(CGF.VoidPtrTy, OutPtr, k);
-      CGF.Builder.CreateAlignedStore(Addr, Slot, CGF.getPointerAlign());
+  for (unsigned k = 0, e = Caps.size(); k < e; ++k) {
+    const TaskLeafCapture &Cap = Caps[k];
+    llvm::Value *V;
+    switch (Cap.Kind) {
+    case TaskLeafCapture::FIRSTPRIVATE:
+      V = CGF.EmitLValueForField(PrivBase, Cap.Field).getPointer(CGF);
+      break;
+    case TaskLeafCapture::SHARED_ADDR:
+      V = CGF.EmitLValueForField(SharedsBase, Cap.Field).getPointer(CGF);
+      break;
+    case TaskLeafCapture::SHARED_PTR:
+      // the field value is &p; its deref is the pointer the leaf param wants
+      V = CGF.EmitLoadOfScalar(CGF.EmitLValueForField(SharedsBase, Cap.Field),
+                               Loc);
+      break;
     }
+    llvm::Value *Addr =
+        CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(V, CGF.VoidPtrTy);
+    llvm::Value *Slot =
+        CGF.Builder.CreateConstInBoundsGEP1_64(CGF.VoidPtrTy, OutPtr, k);
+    CGF.Builder.CreateAlignedStore(Addr, Slot, CGF.getPointerAlign());
   }
   CGF.FinishFunction();
   return Fn;
@@ -4451,11 +4546,12 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
   llvm::Function *ScatterFn = nullptr;
   if (LeafForm) {
     LeafKernel = emitTaskLeafKernel(CGM, Loc, D.getDirectiveKind(),
-                                    KmpTaskTWithPrivatesQTy, KmpTaskTQTy,
+                                    KmpTaskTWithPrivatesQTy, KmpTaskTQTy, SharedsTy,
                                     SharedsPtrTy, TaskFunction, TaskPrivatesMap,
                                     LeafCaps);
     TaskEntry = emitTaskLeafTrampoline(CGM, Loc, LeafKernel, LeafCaps);
-    ScatterFn = emitTaskLeafScatter(CGM, Loc, KmpTaskTWithPrivatesQTy, LeafCaps);
+    ScatterFn = emitTaskLeafScatter(CGM, Loc, KmpTaskTWithPrivatesQTy, KmpTaskTQTy,
+                                    SharedsTy, SharedsPtrTy, LeafCaps);
   } else {
     // Build a proxy function kmp_int32 .omp_task_entry.(kmp_int32 gtid,
     // kmp_task_t *tt);
