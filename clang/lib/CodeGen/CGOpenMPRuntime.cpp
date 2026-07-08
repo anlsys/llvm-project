@@ -4066,24 +4066,29 @@ static bool collectTaskLeafCaptures(CodeGenFunction &CGF,
   if (NeedsCleanup || checkInitIsRequired(CGF, Privates))
     return false;
 
-  // Build the set of firstprivate originals, then require every capture to be
-  // one of them (i.e. no shared/by-ref captures, no `this`/VLA captures).
+  // Gate on "no shared/by-ref captures". CS->captures() is the SHAREDS list:
+  // firstprivate scalars are NOT in it -- they are initialized into the privates
+  // area from the original at task creation (emitPrivatesInit reads OriginalRef),
+  // so the shareds list holds only the by-ref (shared) variables. We therefore
+  // require every capture to be a firstprivate (there are no shared captures);
+  // `this`/VLA captures are also rejected. A task with only globals + firstprivate
+  // scalars has an EMPTY capture list and is eligible.
   const CapturedStmt *CS = D.getCapturedStmt(OMPD_task);
   llvm::SmallPtrSet<const VarDecl *, 8> FP;
   for (const Expr *E : Data.FirstprivateVars)
     FP.insert(
         cast<VarDecl>(cast<DeclRefExpr>(E)->getDecl())->getCanonicalDecl());
-  unsigned NumCaptures = 0;
   for (const CapturedStmt::Capture &Cap : CS->captures()) {
     if (!Cap.capturesVariable() && !Cap.capturesVariableByCopy())
-      return false;
+      return false; // this / VLA / etc.
     if (!FP.count(Cap.getCapturedVar()->getCanonicalDecl()))
-      return false;
-    ++NumCaptures;
+      return false; // a shared/by-ref capture -> not leaf-eligible (yet)
   }
 
-  // Gather the firstprivate scalar privates fields, in Privates order (which is
-  // the privates record's field order). Bail on a firstprivate aggregate/array.
+  // The leaf parameters are the firstprivate scalars, taken from the privates
+  // record in Privates order. Bail on a firstprivate aggregate/array. Private
+  // (non-first) locals stay uninitialized in the leaf's local privates (matching
+  // normal task semantics) and need no parameter.
   unsigned Idx = 0;
   for (const PrivateDataTy &Pair : Privates) {
     if (Pair.second.PrivateElemInit) { // firstprivate
@@ -4095,8 +4100,7 @@ static bool collectTaskLeafCaptures(CodeGenFunction &CGF,
     }
     ++Idx;
   }
-  // One leaf parameter per capture, and every capture accounted for.
-  return Out.size() == NumCaptures;
+  return true;
 }
 
 /// Emit the fusable leaf kernel for a leaf-eligible task:
