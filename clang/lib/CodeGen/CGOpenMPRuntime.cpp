@@ -5476,7 +5476,7 @@ void CGOpenMPRuntime::emitTaskCall(CodeGenFunction &CGF, SourceLocation Loc,
     }
   }
   auto &M = CGM.getModule();
-  auto &&ElseCodeGen = [this, &M, &TaskArgs, NewTaskNewTaskTTy,
+  auto &&ElseCodeGen = [this, &M, &TaskArgs, &Result, NewTaskNewTaskTTy,
                         TaskEntry, &DepWaitTaskArgs, UseV2Wait,
                         HasDepsOrAccesses, Loc](CodeGenFunction &CGF, PrePostActionTy &) {
     CodeGenFunction::RunCleanupsScope LocalScope(CGF);
