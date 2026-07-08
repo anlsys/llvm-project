@@ -4572,6 +4572,18 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
   llvm::Function *LeafKernel = nullptr;
   llvm::Function *ScatterFn = nullptr;
   if (LeafForm) {
+    // Force the privates map always-inline so optimizeTaskClosure folds it into
+    // the leaf and SROA can promote the reconstructed local privates struct to
+    // the leaf's parameters (otherwise, when the frontend leaves the map
+    // noinline, the leaf reloads each firstprivate from local memory and the
+    // fused bodies keep distinct SSA values, defeating loop fusion). Safe: the
+    // map is a per-task helper (it never inlines the enclosing function).
+    if (auto *PM = llvm::dyn_cast_or_null<llvm::Function>(
+            TaskPrivatesMap->stripPointerCasts())) {
+      PM->removeFnAttr(llvm::Attribute::NoInline);
+      PM->removeFnAttr(llvm::Attribute::OptimizeNone);
+      PM->addFnAttr(llvm::Attribute::AlwaysInline);
+    }
     LeafKernel = emitTaskLeafKernel(CGM, Loc, D.getDirectiveKind(),
                                     KmpTaskTWithPrivatesQTy, KmpTaskTQTy, SharedsTy,
                                     SharedsPtrTy, TaskFunction, TaskPrivatesMap,
