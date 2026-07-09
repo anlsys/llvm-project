@@ -6,6 +6,12 @@
 # include "Shared/APITypes.h"
 # include "xktarget.h"
 
+# include "llvm/Support/Error.h"
+
+# include <mutex>
+# include <string>
+# include <unordered_map>
+
 XKRT_NAMESPACE_USE;
 
 /// External function provided by the xkomp runtime.
@@ -45,6 +51,91 @@ static void
 __xktgt_target_kernel_launch_free_dup_args(void * args[XKRT_CALLBACK_ARGS_MAX])
 {
     free(args[0]);
+}
+
+/// Read the device-side LLVM-IR that clang embedded for a target kernel as the
+/// device global "<kernel>__ir" (see emitTargetKernelSourceIR). It is read
+/// host-side from the device image (no device memory access, no JIT), cached per
+/// kernel for the process lifetime. Sets {OutRaw, OutSize} to {NULL, 0} when no
+/// such global exists (e.g. a TU compiled without IR forwarding).
+static void
+__xktgt_get_kernel_ir(
+    llvm::omp::target::plugin::GenericPluginTy & Plugin,
+    llvm::omp::target::plugin::GenericDeviceTy & GenericDevice,
+    llvm::omp::target::plugin::GenericKernelTy & Kernel,
+    void *& OutRaw,
+    size_t & OutSize
+) {
+    /* Fully qualify the plugin types: `DeviceImageTy` also exists in the global
+     * namespace (offload/include/DeviceImage.h), so a `using namespace` here
+     * would be ambiguous. */
+    namespace plugin = llvm::omp::target::plugin;
+
+    /* per-kernel cache (the buffer is owned here, for the process lifetime) */
+    static std::mutex Mtx;
+    static std::unordered_map<const void *, std::pair<void *, size_t>> Cache;
+
+    const void * Key = (const void *) &Kernel;
+    {
+        std::lock_guard<std::mutex> Guard(Mtx);
+        auto It = Cache.find(Key);
+        if (It != Cache.end())
+        {
+            OutRaw  = It->second.first;
+            OutSize = It->second.second;
+            return ;
+        }
+    }
+
+    void * Raw  = NULL;
+    size_t Size = 0;
+
+    plugin::GenericGlobalHandlerTy & GH    = Plugin.getGlobalHandler();
+    plugin::DeviceImageTy          & Image = Kernel.getImage();
+    std::string                      Name  = std::string(Kernel.getName()) + "__ir";
+
+    /* resolve size/presence from the image ELF (host-side) */
+    plugin::GlobalTy Meta(Name);
+    if (llvm::Error E = GH.getGlobalMetadataFromImage(GenericDevice, Image, Meta))
+    {
+        llvm::consumeError(std::move(E));   /* no IR embedded for this kernel */
+    }
+    else if (Meta.getSize() > 0)
+    {
+        void * Buf = malloc(Meta.getSize());
+        if (Buf)
+        {
+            plugin::GlobalTy Host(Name, Meta.getSize(), Buf);
+            if (llvm::Error E2 = GH.readGlobalFromImage(GenericDevice, Image, Host))
+            {
+                llvm::consumeError(std::move(E2));
+                free(Buf);
+            }
+            else
+            {
+                Raw  = Buf;
+                Size = Meta.getSize();
+            }
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> Guard(Mtx);
+        // another thread may have populated the entry while we read unlocked;
+        // if so, drop our buffer and use the existing one (avoids a leak)
+        auto It = Cache.find(Key);
+        if (It != Cache.end())
+        {
+            if (Raw)
+                free(Raw);
+            OutRaw  = It->second.first;
+            OutSize = It->second.second;
+            return ;
+        }
+        Cache[Key] = { Raw, Size };
+    }
+    OutRaw  = Raw;
+    OutSize = Size;
 }
 
 /// Implements a kernel entry that executes the target region on the specified
@@ -208,6 +299,17 @@ __xktgt_target_kernel_launch(
         NumBlocks[0]  = GenericKernel.getEffectiveNumBlocks(GenericDevice, NumBlocks[0], KernelArgs->Tripcount, NumThreads[0], KernelArgs->UserThreadLimit[0] > 0);
     }
 
+    // HIP (unlike CUDA) rejects a kernel launch when any grid or block
+    // dimension is 0, returning hipErrorInvalidValue. Unspecified y/z
+    // dimensions arrive here as 0 (the front-end fills only index [0] for
+    // 1-D launches). Normalize every dimension to at least 1 so the launch is
+    // valid on all backends.
+    for (int d = 0; d < 3; ++d)
+    {
+        if (NumThreads[d] == 0) NumThreads[d] = 1;
+        if (NumBlocks[d]  == 0) NumBlocks[d]  = 1;
+    }
+
     // launch the kernel
     const device_unique_id_t device_unique_id = omp_device_id_to_xkomp(DeviceId);
 
@@ -220,15 +322,30 @@ __xktgt_target_kernel_launch(
     // TODO: support shared memory
 
     constexpr command_queue_type_t qtype = XKRT_QUEUE_TYPE_KERN;
-    constexpr ocg::command_type_t  ctype = ocg::COMMAND_TYPE_PROG;
+    constexpr cgir::command_type_t  ctype = cgir::COMMAND_TYPE_PROG;
     constexpr command_flag_t       flags = COMMAND_FLAG_NONE;
 
+    // device kernel LLVM-IR embedded by clang (read host-side from the image,
+    // cached). {NULL,0} if the TU was compiled without IR forwarding. The buffer
+    // is owned by the cache (process lifetime), so the command is non-owning.
+    void * KernelIR     = NULL;
+    size_t KernelIRSize = 0;
+    __xktgt_get_kernel_ir(*GenericPlugin, GenericDevice, GenericKernel, KernelIR, KernelIRSize);
+
     const auto builder = [&] (command_t * cmd) {
-        cmd->prog.launcher.variadic.fn        = GenericKernel.Func;
-        cmd->prog.launcher.variadic.args      = LaunchParams.Data;
-        cmd->prog.launcher.variadic.args_size = LaunchParams.Size;
-        cmd->prog.source                      = NULL;
-     // cmd->prog.source_type                 = none;
+        // CGIR's uniform VARIADIC launch form: `prog.args` is the kernelParams
+        // array (LaunchParams.Ptrs -- one pointer per kernel parameter), `n_args`
+        // its count. `fn` carries the device kernel handle in the void(void**) fn
+        // slot (function<->object pointer reinterpret is POSIX-safe).
+        cmd->prog.prototype                = cgir::CGIR_COMMAND_PROG_FUNCTION_PROTOTYPE_VARIADIC;
+        cmd->prog.launcher.variadic.fn     = reinterpret_cast<void (*)(void **)>(GenericKernel.Func);
+        cmd->prog.args                     = LaunchParams.Ptrs;
+        cmd->prog.n_args                   = LaunchParams.Size / sizeof(void *);
+        cmd->prog.source.type                 = cgir::COMMAND_PROG_SOURCE_TYPE_LLVMIR;
+        cmd->prog.source.content.llvmir.raw    = KernelIR;
+        cmd->prog.source.content.llvmir.size   = KernelIRSize;
+        cmd->prog.source.content.llvmir._owned = false;   // owned by the cache
+        cmd->prog.source.content.llvmir.symbol = KernelIR ? GenericKernel.getName() : NULL;
         cmd->prog.grid.x                      = NumBlocks[0];
         cmd->prog.grid.y                      = NumBlocks[1];
         cmd->prog.grid.z                      = NumBlocks[2];
@@ -249,19 +366,30 @@ __xktgt_target_kernel_launch(
             // TODO: can be do faster than a malloc here?
             // idea: have a `small_vector_t` within the `command_t`
 
-            // dupplicate args
-            void * dup_args = malloc(LaunchParams.Size);
-            assert(dup_args);
-            memcpy(dup_args, LaunchParams.Data, LaunchParams.Size);
+            // The deferred command outlives this call, but LaunchParams.Ptrs/Data
+            // point into stack-local vectors. Duplicate BOTH the parameter values
+            // (Data) and a fresh pointer array into them (the kernelParams), so
+            // the recorded launch stays valid at (possibly much later) replay.
+            const size_t n_args = LaunchParams.Size / sizeof(void *);
+            void ** dup_vals = (void **) malloc(LaunchParams.Size);
+            assert(dup_vals);
+            memcpy(dup_vals, LaunchParams.Data, LaunchParams.Size);
+            void ** dup_ptrs = (void **) malloc(n_args * sizeof(void *));
+            assert(dup_ptrs);
+            for (size_t i = 0 ; i < n_args ; ++i)
+                dup_ptrs[i] = &dup_vals[i];
 
-            command->prog.launcher.variadic.args = dup_args;
+            command->prog.args   = dup_ptrs;
+            command->prog.n_args = n_args;
 
             // TODO: reenable this free, but gotta find a way to handle replay in TDG
+            // (must free both dup_ptrs and dup_vals). Currently leaked.
             # if 0
             // set callback to release args
             callback_t cb;
             cb.func = __xktgt_target_kernel_launch_free_dup_args;
-            cb.args[0] = dup_args;
+            cb.args[0] = dup_ptrs;
+            cb.args[1] = dup_vals;
             command->completion_callback_push(cb);
             # endif
         };
@@ -271,11 +399,13 @@ __xktgt_target_kernel_launch(
     // else, submit serialized command
     else
     {
-        // can use heap-allocated args
+        // serialized+synchronous: the launch happens within command_submit (the
+        // driver reads kernelParams during cuLaunchKernel/hipModuleLaunchKernel),
+        // so the stack-local LaunchParams.Ptrs is valid for the whole call.
         constexpr command_flag_t flags = COMMAND_FLAG_SERIALIZED | COMMAND_FLAG_SYNCHRONOUS;
         command_t command(ctype, flags);
         builder(&command);
-        command.prog.launcher.variadic.args = LaunchParams.Data;
+        command.prog.args = LaunchParams.Ptrs;   // n_args set by builder
         xkomp->runtime.command_submit(device_unique_id, &command);
     }
 
@@ -398,7 +528,7 @@ __xktgt_target_data_update_nowait_mapper(
 
             // queue/command type
             const command_queue_type_t qtype = (ArgType & OMP_TGT_MAPTYPE_TO) ? XKRT_QUEUE_TYPE_H2D      : XKRT_QUEUE_TYPE_D2H;
-            const ocg::command_type_t  ctype = (ArgType & OMP_TGT_MAPTYPE_TO) ? ocg::COMMAND_TYPE_COPY_H2D_1D : ocg::COMMAND_TYPE_COPY_D2H_1D;
+            const cgir::command_type_t  ctype = (ArgType & OMP_TGT_MAPTYPE_TO) ? cgir::COMMAND_TYPE_COPY_H2D_1D : cgir::COMMAND_TYPE_COPY_D2H_1D;
             constexpr command_flag_t   flags = COMMAND_FLAG_NONE;
 
             xkomp->runtime.task_emit_command(
@@ -496,7 +626,7 @@ __xktgt_target_data_update_mapper(
             const uintptr_t src_ptr = (const uintptr_t) ((ArgType & OMP_TGT_MAPTYPE_TO) ? HstPtrBegin : TgtPtrBegin);
 
             // queue/command type
-            const ocg::command_type_t ctype = (ArgType & OMP_TGT_MAPTYPE_TO) ? ocg::COMMAND_TYPE_COPY_H2D_1D : ocg::COMMAND_TYPE_COPY_D2H_1D;
+            const cgir::command_type_t ctype = (ArgType & OMP_TGT_MAPTYPE_TO) ? cgir::COMMAND_TYPE_COPY_H2D_1D : cgir::COMMAND_TYPE_COPY_D2H_1D;
             constexpr command_flag_t flags = COMMAND_FLAG_SERIALIZED | COMMAND_FLAG_SYNCHRONOUS;
 
             // create and submit serialized command

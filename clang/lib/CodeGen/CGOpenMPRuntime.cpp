@@ -29,10 +29,12 @@
 #include "clang/Basic/SourceManager.h"
 #include "clang/CodeGen/ConstantInitBuilder.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/GlobalValue.h"
@@ -40,8 +42,13 @@
 #include "llvm/IR/Value.h"
 #include "llvm/Support/AtomicOrdering.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Transforms/Scalar/SROA.h"
+#include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 #include <cassert>
 #include <cstdint>
+#include <functional>
 #include <numeric>
 #include <optional>
 
@@ -3117,57 +3124,19 @@ createKmpTaskTWithPrivatesRecordDecl(CodeGenModule &CGM, QualType KmpTaskTQTy,
   return RD;
 }
 
-/// Emit a proxy function which accepts kmp_task_t as the second
-/// argument.
-/// \code
-/// kmp_int32 .omp_task_entry.(kmp_int32 gtid, kmp_task_t *tt) {
-///   TaskFunction(gtid, tt->part_id, &tt->privates, task_privates_map, tt,
-///   For taskloops:
-///   tt->task_data.lb, tt->task_data.ub, tt->task_data.st, tt->task_data.liter,
-///   tt->reductions, tt->shareds);
-///   return 0;
-/// }
-/// \endcode
-static llvm::Function *
-emitProxyTaskFunction(CodeGenModule &CGM, SourceLocation Loc,
-                      OpenMPDirectiveKind Kind, QualType KmpInt32Ty,
-                      QualType KmpTaskTWithPrivatesPtrQTy,
-                      QualType KmpTaskTWithPrivatesQTy, QualType KmpTaskTQTy,
-                      QualType SharedsPtrTy, llvm::Function *TaskFunction,
-                      llvm::Value *TaskPrivatesMap) {
-  ASTContext &C = CGM.getContext();
-  auto *GtidArg =
-      ImplicitParamDecl::Create(C, /*DC=*/nullptr, Loc, /*Id=*/nullptr,
-                                KmpInt32Ty, ImplicitParamKind::Other);
-  auto *TaskTypeArg = ImplicitParamDecl::Create(
-      C, /*DC=*/nullptr, Loc, /*Id=*/nullptr,
-      KmpTaskTWithPrivatesPtrQTy.withRestrict(), ImplicitParamKind::Other);
-  FunctionArgList Args{GtidArg, TaskTypeArg};
-  const auto &TaskEntryFnInfo =
-      CGM.getTypes().arrangeBuiltinFunctionDeclaration(KmpInt32Ty, Args);
-  llvm::FunctionType *TaskEntryTy =
-      CGM.getTypes().GetFunctionType(TaskEntryFnInfo);
-  std::string Name = CGM.getOpenMPRuntime().getName({"omp_task_entry", ""});
-  auto *TaskEntry = llvm::Function::Create(
-      TaskEntryTy, llvm::GlobalValue::InternalLinkage, Name, &CGM.getModule());
-  CGM.SetInternalFunctionAttributes(GlobalDecl(), TaskEntry, TaskEntryFnInfo);
-  if (!CGM.getCodeGenOpts().SampleProfileFile.empty())
-    TaskEntry->addFnAttr("sample-profile-suffix-elision-policy", "selected");
-  TaskEntry->setDoesNotRecurse();
-  CodeGenFunction CGF(CGM);
-  CGF.StartFunction(GlobalDecl(), KmpInt32Ty, TaskEntry, TaskEntryFnInfo, Args,
-                    Loc, Loc);
-
-  // TaskFunction(gtid, tt->task_data.part_id, &tt->privates, task_privates_map,
-  // tt,
-  // For taskloops:
-  // tt->task_data.lb, tt->task_data.ub, tt->task_data.st, tt->task_data.liter,
-  // tt->task_data.shareds);
-  llvm::Value *GtidParam = CGF.EmitLoadOfScalar(
-      CGF.GetAddrOfLocalVar(GtidArg), /*Volatile=*/false, KmpInt32Ty, Loc);
-  LValue TDBase = CGF.EmitLoadOfPointerLValue(
-      CGF.GetAddrOfLocalVar(TaskTypeArg),
-      KmpTaskTWithPrivatesPtrQTy->castAs<PointerType>());
+/// Emit the call to the outlined \p TaskFunction given the KmpTaskTWithPrivates
+/// base as an LValue (\p TDBase). Recovers part_id / shareds / privates (and, for
+/// taskloops, the loop bounds) from the base exactly like the proxy, then
+/// invokes TaskFunction. Shared by the proxy (.omp_task_entry. for tasks kept on
+/// the args[0]==tt ABI) and the unpacked kernel (.omp_task_kernel., which builds a
+/// local base from its individual capture parameters). \p GtidParam is the gtid
+/// value to forward (recorded task bodies replay with gtid 0).
+static void
+emitOutlinedTaskCall(CodeGenModule &CGM, CodeGenFunction &CGF,
+                     SourceLocation Loc, OpenMPDirectiveKind Kind, LValue TDBase,
+                     QualType KmpTaskTWithPrivatesQTy, QualType KmpTaskTQTy,
+                     QualType SharedsPtrTy, llvm::Function *TaskFunction,
+                     llvm::Value *TaskPrivatesMap, llvm::Value *GtidParam) {
   const auto *KmpTaskTWithPrivatesQTyRD =
       KmpTaskTWithPrivatesQTy->castAsRecordDecl();
   LValue Base =
@@ -3227,10 +3196,107 @@ emitProxyTaskFunction(CodeGenModule &CGM, SourceLocation Loc,
 
   CGM.getOpenMPRuntime().emitOutlinedFunctionCall(CGF, Loc, TaskFunction,
                                                   CallArgs);
+}
+
+/// Emit a proxy function which accepts kmp_task_t as the second
+/// argument.
+/// \code
+/// kmp_int32 .omp_task_entry.(kmp_int32 gtid, kmp_task_t *tt) {
+///   TaskFunction(gtid, tt->part_id, &tt->privates, task_privates_map, tt,
+///   For taskloops:
+///   tt->task_data.lb, tt->task_data.ub, tt->task_data.st, tt->task_data.liter,
+///   tt->reductions, tt->shareds);
+///   return 0;
+/// }
+/// \endcode
+static llvm::Function *
+emitProxyTaskFunction(CodeGenModule &CGM, SourceLocation Loc,
+                      OpenMPDirectiveKind Kind, QualType KmpInt32Ty,
+                      QualType KmpTaskTWithPrivatesPtrQTy,
+                      QualType KmpTaskTWithPrivatesQTy, QualType KmpTaskTQTy,
+                      QualType SharedsPtrTy, llvm::Function *TaskFunction,
+                      llvm::Value *TaskPrivatesMap) {
+  // The standard libomp task routine: kmp_task->routine, invoked by the runtime
+  // as .omp_task_entry.(gtid, tt) for direct execution and non-JIT taskgraph
+  // replay. It recovers part_id/shareds/privates from `tt` and calls the outlined
+  // body via emitOutlinedTaskCall. The separate void(void**) kernel forwarded for
+  // JIT/prog-fuse is emitted by emitPackedTaskKernel / emitTaskUnpackedKernel.
+  ASTContext &C = CGM.getContext();
+  auto *GtidArg =
+      ImplicitParamDecl::Create(C, /*DC=*/nullptr, Loc, /*Id=*/nullptr,
+                                KmpInt32Ty, ImplicitParamKind::Other);
+  auto *TaskTypeArg = ImplicitParamDecl::Create(
+      C, /*DC=*/nullptr, Loc, /*Id=*/nullptr,
+      KmpTaskTWithPrivatesPtrQTy.withRestrict(), ImplicitParamKind::Other);
+  FunctionArgList Args{GtidArg, TaskTypeArg};
+  const auto &TaskEntryFnInfo =
+      CGM.getTypes().arrangeBuiltinFunctionDeclaration(KmpInt32Ty, Args);
+  llvm::FunctionType *TaskEntryTy =
+      CGM.getTypes().GetFunctionType(TaskEntryFnInfo);
+  std::string Name = CGM.getOpenMPRuntime().getName({"omp_task_entry", ""});
+  auto *TaskEntry = llvm::Function::Create(
+      TaskEntryTy, llvm::GlobalValue::InternalLinkage, Name, &CGM.getModule());
+  CGM.SetInternalFunctionAttributes(GlobalDecl(), TaskEntry, TaskEntryFnInfo);
+  if (!CGM.getCodeGenOpts().SampleProfileFile.empty())
+    TaskEntry->addFnAttr("sample-profile-suffix-elision-policy", "selected");
+  TaskEntry->setDoesNotRecurse();
+  CodeGenFunction CGF(CGM);
+  CGF.StartFunction(GlobalDecl(), KmpInt32Ty, TaskEntry, TaskEntryFnInfo, Args,
+                    Loc, Loc);
+
+  llvm::Value *GtidParam = CGF.EmitLoadOfScalar(
+      CGF.GetAddrOfLocalVar(GtidArg), /*Volatile=*/false, KmpInt32Ty, Loc);
+  LValue TDBase = CGF.EmitLoadOfPointerLValue(
+      CGF.GetAddrOfLocalVar(TaskTypeArg),
+      KmpTaskTWithPrivatesPtrQTy->castAs<PointerType>());
+  emitOutlinedTaskCall(CGM, CGF, Loc, Kind, TDBase, KmpTaskTWithPrivatesQTy,
+                       KmpTaskTQTy, SharedsPtrTy, TaskFunction, TaskPrivatesMap,
+                       GtidParam);
   CGF.EmitStoreThroughLValue(RValue::get(CGF.Builder.getInt32(/*C=*/0)),
                              CGF.MakeAddrLValue(CGF.ReturnValue, KmpInt32Ty));
   CGF.FinishFunction();
   return TaskEntry;
+}
+
+/// Emit the "packed" forwarded JIT kernel for a task that is NOT unpacked-eligible
+/// (taskloops, target, shared/by-ref captures, reductions, ...; see
+/// collectTaskUnpackedCaptures). It is a uniform void(void**) program CGIR can
+/// JIT and program-level-fuse:
+/// \code
+///   void .omp_task_kernel.(void ** args) { .omp_task_entry.(0, args[0]); }
+/// \endcode
+/// args[0] is the kmp_task_t* (the single recorded slot); it forwards to the
+/// ahead-of-time proxy \p Proxy (recorded bodies replay with gtid 0). Because the
+/// body reaches its captured data through args[0] rather than distinct per-value
+/// slots, CGIR fuses such bodies only at the PROGRAM level, not the LOOP level.
+static llvm::Function *
+emitPackedTaskKernel(CodeGenModule &CGM, SourceLocation Loc,
+                     llvm::Function *Proxy) {
+  ASTContext &C = CGM.getContext();
+  QualType VoidPtrPtrTy = C.getPointerType(C.VoidPtrTy);
+  auto *ArgsArg =
+      ImplicitParamDecl::Create(C, /*DC=*/nullptr, Loc, /*Id=*/nullptr,
+                                VoidPtrPtrTy, ImplicitParamKind::Other);
+  FunctionArgList Args{ArgsArg};
+  const auto &FnInfo =
+      CGM.getTypes().arrangeBuiltinFunctionDeclaration(C.VoidTy, Args);
+  llvm::FunctionType *FnTy = CGM.getTypes().GetFunctionType(FnInfo);
+  std::string Name = CGM.getOpenMPRuntime().getName({"omp_task_kernel", ""});
+  auto *Fn = llvm::Function::Create(FnTy, llvm::GlobalValue::InternalLinkage,
+                                    Name, &CGM.getModule());
+  CGM.SetInternalFunctionAttributes(GlobalDecl(), Fn, FnInfo);
+  Fn->setDoesNotRecurse();
+  CodeGenFunction CGF(CGM);
+  CGF.StartFunction(GlobalDecl(), C.VoidTy, Fn, FnInfo, Args, Loc, Loc);
+
+  // tt = args[0]; .omp_task_entry.(0, tt)  (kmp_int32 return ignored)
+  llvm::Value *ArgsPtr = CGF.Builder.CreateLoad(CGF.GetAddrOfLocalVar(ArgsArg));
+  llvm::Value *TaskVoidPtr = CGF.Builder.CreateAlignedLoad(
+      CGF.VoidPtrTy, ArgsPtr, CGF.getPointerAlign());
+  llvm::Value *CallArgs[] = {CGF.Builder.getInt32(0), TaskVoidPtr};
+  CGF.Builder.CreateCall(Proxy->getFunctionType(), Proxy, CallArgs);
+  CGF.FinishFunction();
+  return Fn;
 }
 
 static llvm::Value *emitDestructorsFunction(CodeGenModule &CGM,
@@ -3768,6 +3834,609 @@ static void getKmpAffinityType(ASTContext &C, QualType &KmpTaskAffinityInfoTy) {
   }
 }
 
+/// Collect the transitive closure of *defined* globals referenced by \p Root
+/// (called functions and referenced global variables, recursively, including
+/// those nested inside ConstantExprs). \p Keep receives every defined
+/// GlobalValue reachable from \p Root (including \p Root). Declarations are not
+/// added (they remain external references). This lets us extract a
+/// self-contained sub-module for \p Root that still links/JITs.
+static void
+computeIRClosure(const llvm::Function *Root,
+                 llvm::SmallPtrSetImpl<const llvm::GlobalValue *> &Keep) {
+  llvm::SmallVector<const llvm::GlobalValue *, 16> Work;
+  auto Enqueue = [&](const llvm::GlobalValue *GV) {
+    if (GV && !GV->isDeclaration() && Keep.insert(GV).second)
+      Work.push_back(GV);
+  };
+  std::function<void(const llvm::Value *)> Visit = [&](const llvm::Value *V) {
+    if (const auto *GV = llvm::dyn_cast<llvm::GlobalValue>(V)) {
+      Enqueue(GV);
+      return;
+    }
+    if (const auto *C = llvm::dyn_cast<llvm::Constant>(V))
+      for (const llvm::Use &U : C->operands())
+        Visit(U.get());
+  };
+  Enqueue(Root);
+  while (!Work.empty()) {
+    const llvm::GlobalValue *GV = Work.pop_back_val();
+    if (const auto *F = llvm::dyn_cast<llvm::Function>(GV)) {
+      for (const llvm::BasicBlock &BB : *F)
+        for (const llvm::Instruction &I : BB)
+          for (const llvm::Value *Op : I.operands())
+            Visit(Op);
+    } else if (const auto *G = llvm::dyn_cast<llvm::GlobalVariable>(GV)) {
+      if (G->hasInitializer())
+        Visit(G->getInitializer());
+    }
+  }
+}
+
+/// Scalarize the cloned unpacked-kernel closure \p Entry in place so the recorded
+/// snapshot reaches CGIR's prog-fuse already scalarized (like a device kernel).
+/// Folds the always-inline task helpers (outlined region and, at -O>0, the
+/// privates map) into Entry and SROAs it, so its reconstructed task struct /
+/// shareds / ptmp promote to SSA and the captured values become the loop base --
+/// what lets prog-fuse deduplicate them and fuse the loops.
+///
+/// Runs DURING codegen, so the module still holds INCOMPLETE functions (e.g. the
+/// mid-emission enclosing function, reachable when a task body recurses). Hence
+/// no whole-module pass (a DominatorTree over a half-built CFG crashes): inlining
+/// uses the targeted InlineFunction API (always-inline helpers only, never the
+/// enclosing function), and SROA runs on Entry alone (fully emitted). At -O0 the
+/// privates map stays noinline, so the body simply does not loop-fuse.
+static void optimizeTaskClosure(llvm::Function *Entry) {
+  if (!Entry || Entry->isDeclaration())
+    return;
+
+  // Force always-inline on the privates-map helper(s): the frontend leaves
+  // .omp_task_privates_map. noinline unless optimizing, which would keep it an
+  // opaque call and stop SROA from promoting the reconstructed privates struct.
+  // Matching by name touches only that per-task helper (never the enclosing fn)
+  // and only sets attributes (no CFG walk), so it is safe here.
+  for (llvm::Function &F : *Entry->getParent()) {
+    if (F.isDeclaration())
+      continue;
+    if (F.getName().contains(".omp_task_privates_map.")) {
+      F.removeFnAttr(llvm::Attribute::NoInline);
+      F.removeFnAttr(llvm::Attribute::OptimizeNone);
+      F.addFnAttr(llvm::Attribute::AlwaysInline);
+    }
+  }
+
+  // Alternate targeted inlining and SROA to a fixpoint: inline the always-inline
+  // helpers called directly in Entry, then SROA it. SROA promotes the outlined
+  // body's arg allocas, devirtualizing its indirect privates-map call into a
+  // direct one (exposing the next round), and finally promotes the reconstructed
+  // struct so the loop reads Entry's parameters directly. Only always-inline
+  // direct callees are inlined (never the incomplete enclosing fn).
+  for (unsigned Round = 0; Round < 8; ++Round) {
+    bool Inlined = false;
+    unsigned Budget = 4096;
+    bool Changed = true;
+    while (Changed && Budget) {
+      Changed = false;
+      for (llvm::BasicBlock &BB : *Entry) {
+        for (llvm::Instruction &I : BB) {
+          auto *CI = llvm::dyn_cast<llvm::CallInst>(&I);
+          if (!CI)
+            continue;
+          llvm::Function *Callee = CI->getCalledFunction();
+          if (!Callee || Callee->isDeclaration() || Callee == Entry ||
+              !Callee->hasFnAttribute(llvm::Attribute::AlwaysInline))
+            continue;
+          llvm::InlineFunctionInfo IFI;
+          if (llvm::InlineFunction(*CI, IFI).isSuccess()) {
+            --Budget;
+            Changed = true;
+            Inlined = true;
+            break; // iterators invalidated: restart the scan
+          }
+        }
+        if (Changed)
+          break;
+      }
+    }
+
+    // SROA Entry ONLY (it is complete).
+    llvm::PassBuilder PB;
+    llvm::FunctionAnalysisManager FAM;
+    PB.registerFunctionAnalyses(FAM);
+    llvm::FunctionPassManager FPM;
+    FPM.addPass(llvm::SROAPass(llvm::SROAOptions(llvm::SROAOptions::ModifyCFG)));
+    FPM.run(*Entry, FAM);
+
+    if (!Inlined)
+      break;
+  }
+}
+
+/// Serialize the closure of \p Fn (see computeIRClosure) to LLVM bitcode in
+/// \p Out. Returns false on failure. \p Fn and its transitively-referenced
+/// definitions are kept; everything else becomes an external declaration.
+///
+/// When \p OptimizeClone is set, the clone is scalarized before serialization
+/// (see optimizeTaskClosure) so the recorded snapshot is directly fusable;
+/// otherwise it is a raw pre-optimization snapshot.
+///
+/// When \p Externs is non-null, the closure's referenced *mutable* global
+/// variables are turned into external *declarations* in the clone and the
+/// corresponding originals are appended to \p Externs. This lets the in-process
+/// JIT (CGIR) bind them to the process's real objects (via their addresses,
+/// emitted by the caller) instead of duplicating module-local storage — the
+/// difference between a JIT'd task body updating the real arrays vs a private
+/// copy. Read-only constants are left defined (harmless to duplicate). Pass null
+/// on the device path, where globals must stay defined in the device image.
+static bool
+serializeClosureToBitcode(CodeGenModule &CGM, llvm::Function *Fn,
+                          llvm::SmallVectorImpl<char> &Out,
+                          llvm::SmallVectorImpl<llvm::GlobalVariable *> *Externs,
+                          bool OptimizeClone = false) {
+  llvm::SmallPtrSet<const llvm::GlobalValue *, 32> Keep;
+  computeIRClosure(Fn, Keep);
+
+  llvm::ValueToValueMapTy VMap;
+  std::unique_ptr<llvm::Module> Clone = llvm::CloneModule(
+      CGM.getModule(), VMap,
+      [&](const llvm::GlobalValue *GV) { return Keep.count(GV) != 0; });
+  if (!Clone)
+    return false;
+
+  // Externalize the entry in the clone so the in-process JIT can resolve it
+  // (the original task/proxy function is internal). The clone is discarded
+  // after serialization, so this does not affect the real module.
+  auto *ClonedEntry = llvm::dyn_cast_or_null<llvm::Function>(VMap.lookup(Fn));
+  if (ClonedEntry) {
+    ClonedEntry->setLinkage(llvm::GlobalValue::ExternalLinkage);
+    ClonedEntry->setVisibility(llvm::GlobalValue::DefaultVisibility);
+  }
+
+  // Externalize referenced mutable global variables (see the doc comment).
+  if (Externs) {
+    for (const llvm::GlobalValue *GV : Keep) {
+      const auto *G = llvm::dyn_cast<llvm::GlobalVariable>(GV);
+      if (!G || G->isConstant() || !G->hasInitializer() || G->isThreadLocal())
+        continue;
+      auto *ClonedG =
+          llvm::dyn_cast_or_null<llvm::GlobalVariable>(VMap.lookup(G));
+      if (!ClonedG || ClonedG->isDeclaration())
+        continue;
+      ClonedG->setInitializer(nullptr);
+      ClonedG->setComdat(nullptr);
+      ClonedG->setLinkage(llvm::GlobalValue::ExternalLinkage);
+      ClonedG->setVisibility(llvm::GlobalValue::DefaultVisibility);
+      Externs->push_back(const_cast<llvm::GlobalVariable *>(G));
+    }
+  }
+
+  // Scalarize the entry so the recorded snapshot is directly fusable; done after
+  // externalizing the entry/globals so those references are preserved.
+  if (OptimizeClone)
+    optimizeTaskClosure(ClonedEntry);
+
+  llvm::raw_svector_ostream OS(Out);
+  llvm::WriteBitcodeToFile(*Clone, OS);
+  return !Out.empty();
+}
+
+/// {bitcode, size, externs-table, externs-count} forwarded to the runtime for a
+/// task body: the serialized IR closure plus the resolution table for the
+/// mutable globals the body references (see emitTaskSourceIR).
+struct TaskSourceIR {
+  llvm::Constant *IRPtr;        // i8* to the embedded bitcode (or null)
+  llvm::Value    *IRSize;       // size_t bytes
+  llvm::Constant *ExternsPtr;   // {i8* name, i8* addr}[] table (or null)
+  llvm::Value    *ExternsCount; // size_t number of entries
+};
+
+/// Serialize the outlined task body \p Fn to LLVM bitcode, embed it as a private
+/// constant global, and (for the mutable globals the body references) emit a
+/// resolution table mapping each externalized global's name to its real runtime
+/// address. Returns null/0 fields when \p Fn is null.
+static TaskSourceIR
+emitTaskSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
+  llvm::Module &M = CGM.getModule();
+  llvm::LLVMContext &Ctx = M.getContext();
+  llvm::Constant *NullPtr = llvm::ConstantPointerNull::get(CGM.Int8PtrTy);
+  llvm::Value *Zero = llvm::ConstantInt::get(CGM.SizeTy, 0);
+
+  if (!Fn)
+    return {NullPtr, Zero, NullPtr, Zero};
+
+  llvm::SmallString<4096> Buffer;
+  llvm::SmallVector<llvm::GlobalVariable *, 8> Externs;
+  // Optimize (scalarize) the closure so an unpacked task body is recorded in a
+  // directly-fusable form; see optimizeTaskClosure.
+  if (!serializeClosureToBitcode(CGM, Fn, Buffer, &Externs, /*OptimizeClone=*/true))
+    return {NullPtr, Zero, NullPtr, Zero};
+
+  // Embed as a private constant byte array global.
+  llvm::Constant *Init = llvm::ConstantDataArray::get(
+      Ctx, llvm::ArrayRef<uint8_t>(
+               reinterpret_cast<const uint8_t *>(Buffer.data()),
+               Buffer.size()));
+  auto *GV = new llvm::GlobalVariable(
+      M, Init->getType(), /*isConstant=*/true,
+      llvm::GlobalValue::PrivateLinkage, Init,
+      llvm::Twine(".omp_task_ir.") + Fn->getName());
+  GV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+
+  llvm::Value *Size = llvm::ConstantInt::get(CGM.SizeTy, Buffer.size());
+
+  // Build the externalized-global resolution table:
+  //   struct { i8* name; i8* addr; } __omp_task_externs.<Fn>[N]
+  // `addr` is a reference to the original (module-defined) global, so at load
+  // time it resolves to the real runtime address. The runtime forwards this to
+  // CGIR's jit, which installs each as an absolute symbol.
+  llvm::Constant *ExternsPtr = NullPtr;
+  llvm::Value *ExternsCount = Zero;
+  if (!Externs.empty()) {
+    llvm::StructType *EntryTy =
+        llvm::StructType::get(CGM.Int8PtrTy, CGM.Int8PtrTy);
+    llvm::SmallVector<llvm::Constant *, 8> Entries;
+    Entries.reserve(Externs.size());
+    for (llvm::GlobalVariable *G : Externs) {
+      llvm::Constant *Name =
+          CGM.GetAddrOfConstantCString(G->getName().str()).getPointer();
+      llvm::Constant *NameC =
+          llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(Name,
+                                                               CGM.Int8PtrTy);
+      llvm::Constant *AddrC =
+          llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(G, CGM.Int8PtrTy);
+      Entries.push_back(llvm::ConstantStruct::get(EntryTy, {NameC, AddrC}));
+    }
+    llvm::ArrayType *ArrTy = llvm::ArrayType::get(EntryTy, Entries.size());
+    llvm::Constant *ArrInit = llvm::ConstantArray::get(ArrTy, Entries);
+    auto *ExternsGV = new llvm::GlobalVariable(
+        M, ArrTy, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
+        ArrInit, llvm::Twine(".omp_task_externs.") + Fn->getName());
+    ExternsGV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    ExternsPtr = ExternsGV;
+    ExternsCount = llvm::ConstantInt::get(CGM.SizeTy, Externs.size());
+  }
+
+  return {GV, Size, ExternsPtr, ExternsCount};
+}
+
+/// On device compilation, serialize the target-region kernel \p Fn's IR closure
+/// and embed it as an externally-visible device global named "<Fn>__ir", kept
+/// alive via llvm.used. The host runtime reads it back from the device image
+/// (offload GlobalHandler::readGlobalFromImage) and forwards it to XKOMP so the
+/// kernel can later be JIT-compiled/fused. No-op if \p Fn is null.
+static void
+emitTargetKernelSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
+  if (!Fn)
+    return;
+  llvm::Module &M = CGM.getModule();
+  llvm::LLVMContext &Ctx = M.getContext();
+
+  llvm::SmallString<4096> Buffer;
+  if (!serializeClosureToBitcode(CGM, Fn, Buffer, /*Externs=*/nullptr))
+    return;
+
+  llvm::Constant *Init = llvm::ConstantDataArray::get(
+      Ctx, llvm::ArrayRef<uint8_t>(
+               reinterpret_cast<const uint8_t *>(Buffer.data()),
+               Buffer.size()));
+  // External linkage + llvm.used so the global survives optimization and the
+  // device assembler, landing in the device image's symbol table with its data.
+  // Not marked constant so it goes to ordinary (large) device global storage
+  // rather than the size-limited constant bank; the initializer still lives in
+  // the image and is read host-side via the offload GlobalHandler.
+  auto *GV = new llvm::GlobalVariable(
+      M, Init->getType(), /*isConstant=*/false,
+      llvm::GlobalValue::ExternalLinkage, Init,
+      llvm::Twine(Fn->getName()) + "__ir");
+  llvm::appendToUsed(M, {GV});
+}
+
+// One capture exposed as a parameter of an unpacked task. The kernel takes one
+// value parameter per capture; `Ty` is that parameter's type. `Field` is the
+// record field the value lives in (the privates record for FIRSTPRIVATE, the
+// shareds record for SHARED_*). The three kinds differ in how the scatter forms
+// the &value slot and how the kernel feeds the value back to the outlined body:
+//
+//   FIRSTPRIVATE : privates.<field> holds the copied value.
+//                  scatter: &privates.<field>;   kernel: privates.<field> = param.
+//   SHARED_ADDR  : an array/scalar/struct captured by-ref; shareds.<field> holds
+//                  the base/address the body uses directly (one load).
+//                  scatter: &shareds.<field>;    kernel: shareds.<field> = param.
+//   SHARED_PTR   : a pointer variable captured by-ref; shareds.<field> holds
+//                  &p, and the body loads it twice to reach the pointer value.
+//                  scatter: load(&shareds.<field>) (== &p);
+//                  kernel: ptmp = param; shareds.<field> = &ptmp.
+//
+// For all three, the loop's base ends up equal to the kernel parameter (after
+// SROA), so prog-fuse can deduplicate it across fused bodies and fuse the loops.
+namespace {
+struct TaskUnpackedCapture {
+  enum CaptureKind { FIRSTPRIVATE, SHARED_ADDR, SHARED_PTR } Kind;
+  const FieldDecl *Field; // privates field (FIRSTPRIVATE) or shareds field (SHARED_*)
+  QualType Ty;            // the unpacked parameter type
+};
+} // namespace
+
+/// Decide whether a task can be emitted in the fusable "unpacked-kernel" form and,
+/// if so, collect its captures. Eligible iff it is a plain, tied `#pragma omp
+/// task` (no taskloop/target/reduction/lastprivate/detach, trivially-copyable
+/// firstprivates with no destructors) whose captures are all firstprivate
+/// scalars and/or shared by-ref variables (arrays/pointers/scalars/structs).
+/// Such a body reaches its captured data only through those parameters (plus
+/// globals), so it can be outlined as an unpacked kernel taking one value parameter
+/// per capture -- which is what lets CGIR's prog-fuse pass deduplicate the
+/// captured values across consecutive task bodies and fuse their loops. A task
+/// using only globals (no captures) is eligible with an empty capture list.
+/// Returns false (keeping the packed args[0]==tt kernel) for anything else.
+static bool collectTaskUnpackedCaptures(CodeGenFunction &CGF,
+                                    const OMPExecutableDirective &D,
+                                    const OMPTaskDataTy &Data,
+                                    ArrayRef<PrivateDataTy> Privates,
+                                    const RecordDecl *PrivatesRD,
+                                    bool NeedsCleanup,
+                                    SmallVectorImpl<TaskUnpackedCapture> &Out) {
+  if (D.getDirectiveKind() != OMPD_task)
+    return false;
+  if (!Data.Tied)
+    return false;
+  if (!Data.LastprivateVars.empty())
+    return false;
+  if (D.hasClausesOfKind<OMPReductionClause>() ||
+      D.hasClausesOfKind<OMPInReductionClause>() ||
+      D.hasClausesOfKind<OMPDetachClause>())
+    return false;
+  if (NeedsCleanup || checkInitIsRequired(CGF, Privates))
+    return false;
+
+  // Firstprivate parameters: the firstprivate entries of the privates record (in
+  // Privates order). Bail on a firstprivate aggregate/array. Private (non-first)
+  // locals stay uninitialized in the kernel's local privates (matching normal task
+  // semantics) and need no parameter.
+  llvm::SmallPtrSet<const VarDecl *, 8> FP;
+  for (const Expr *E : Data.FirstprivateVars)
+    FP.insert(
+        cast<VarDecl>(cast<DeclRefExpr>(E)->getDecl())->getCanonicalDecl());
+  unsigned Idx = 0;
+  for (const PrivateDataTy &Pair : Privates) {
+    if (Pair.second.PrivateElemInit) { // firstprivate
+      assert(PrivatesRD && "firstprivate without a privates record");
+      const FieldDecl *FD = *std::next(PrivatesRD->field_begin(), Idx);
+      if (!FD->getType()->isScalarType())
+        return false;
+      Out.push_back({TaskUnpackedCapture::FIRSTPRIVATE, FD, FD->getType()});
+    }
+    ++Idx;
+  }
+
+  // Shared parameters: the by-ref captures (CS->captures() minus the
+  // firstprivates). Each maps to a shareds-record field (a pointer). A pointer
+  // variable needs the double-load handling (SHARED_PTR); everything else
+  // (arrays/scalars/structs) is reached with one load (SHARED_ADDR). Reject
+  // `this`/VLA captures and any non-pointer (by-value) capture field.
+  const CapturedStmt *CS = D.getCapturedStmt(OMPD_task);
+  CodeGenFunction::CGCapturedStmtInfo CapturesInfo(*CS);
+  for (const CapturedStmt::Capture &Cap : CS->captures()) {
+    if (!Cap.capturesVariable() && !Cap.capturesVariableByCopy())
+      return false; // this / VLA / etc.
+    const VarDecl *VD = Cap.getCapturedVar();
+    if (FP.count(VD->getCanonicalDecl()))
+      continue; // a firstprivate that is also captured -> handled above
+    const FieldDecl *FD = CapturesInfo.lookup(VD);
+    if (!FD || !FD->getType()->isPointerType())
+      return false; // unexpected / by-value capture
+    if (VD->getType()->isPointerType())
+      Out.push_back({TaskUnpackedCapture::SHARED_PTR, FD, VD->getType()});
+    else
+      Out.push_back({TaskUnpackedCapture::SHARED_ADDR, FD, FD->getType()});
+  }
+  return true;
+}
+
+/// Emit the fusable unpacked kernel for an unpacked-eligible task:
+///   void .omp_task_kernel.(<cap0>, <cap1>, ...)
+/// It rebuilds a local KmpTaskTWithPrivates (and, if there are shared captures, a
+/// local shareds record) from its parameters and runs the SAME outlined body via
+/// emitOutlinedTaskCall. After inlining + SROA (in CGIR's prog-fuse/jit O3
+/// pipeline) the locals promote away and the loop reads the parameter SSA values
+/// directly, so prog-fuse can align/deduplicate the captured values across fused
+/// bodies and fuse the loops. See TaskUnpackedCapture for how each kind is fed back.
+static llvm::Function *
+emitTaskUnpackedKernel(CodeGenModule &CGM, SourceLocation Loc,
+                   OpenMPDirectiveKind Kind, QualType KmpTaskTWithPrivatesQTy,
+                   QualType KmpTaskTQTy, QualType SharedsTy, QualType SharedsPtrTy,
+                   llvm::Function *TaskFunction, llvm::Value *TaskPrivatesMap,
+                   ArrayRef<TaskUnpackedCapture> Caps) {
+  ASTContext &C = CGM.getContext();
+  const auto *WithPrivRD = KmpTaskTWithPrivatesQTy->castAsRecordDecl();
+  const auto *KmpTaskTQTyRD = KmpTaskTQTy->castAsRecordDecl();
+
+  bool HasShared = false, HasFirstprivate = false;
+  for (const TaskUnpackedCapture &Cap : Caps) {
+    if (Cap.Kind == TaskUnpackedCapture::FIRSTPRIVATE)
+      HasFirstprivate = true;
+    else
+      HasShared = true;
+  }
+
+  FunctionArgList Args;
+  SmallVector<const VarDecl *, 8> ParamDecls;
+  for (const TaskUnpackedCapture &Cap : Caps) {
+    auto *A = ImplicitParamDecl::Create(C, /*DC=*/nullptr, Loc, /*Id=*/nullptr,
+                                        Cap.Ty, ImplicitParamKind::Other);
+    Args.push_back(A);
+    ParamDecls.push_back(A);
+  }
+  const auto &FnInfo =
+      CGM.getTypes().arrangeBuiltinFunctionDeclaration(C.VoidTy, Args);
+  llvm::FunctionType *FnTy = CGM.getTypes().GetFunctionType(FnInfo);
+  std::string Name = CGM.getOpenMPRuntime().getName({"omp_task_kernel", ""});
+  auto *Fn = llvm::Function::Create(FnTy, llvm::GlobalValue::InternalLinkage,
+                                    Name, &CGM.getModule());
+  CGM.SetInternalFunctionAttributes(GlobalDecl(), Fn, FnInfo);
+  Fn->setDoesNotRecurse();
+  CodeGenFunction CGF(CGM);
+  CGF.StartFunction(GlobalDecl(), C.VoidTy, Fn, FnInfo, Args, Loc, Loc);
+
+  // Local KmpTaskTWithPrivates base (+ a local shareds record if needed), built
+  // from the parameters.
+  Address TL = CGF.CreateMemTemp(KmpTaskTWithPrivatesQTy, "task.unpacked");
+  LValue TDBase = CGF.MakeAddrLValue(TL, KmpTaskTWithPrivatesQTy);
+  LValue TaskData = CGF.EmitLValueForField(TDBase, *WithPrivRD->field_begin());
+
+  Address SL = Address::invalid();
+  if (HasShared)
+    SL = CGF.CreateMemTemp(SharedsTy, "shareds.unpacked");
+  // task_data.shareds = &SL (or null when there are no shared captures)
+  CGF.EmitStoreOfScalar(
+      HasShared ? CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
+                      SL.emitRawPointer(CGF), CGF.VoidPtrTy)
+                : llvm::ConstantPointerNull::get(CGF.VoidPtrTy),
+      CGF.EmitLValueForField(
+          TaskData, *std::next(KmpTaskTQTyRD->field_begin(), KmpTaskTShareds)));
+  // part_id = 0
+  CGF.EmitStoreOfScalar(
+      llvm::ConstantInt::get(CGF.Int32Ty, 0),
+      CGF.EmitLValueForField(
+          TaskData, *std::next(KmpTaskTQTyRD->field_begin(), KmpTaskTPartId)));
+
+  LValue PrivBase;
+  if (HasFirstprivate)
+    PrivBase = CGF.EmitLValueForField(TDBase, *std::next(WithPrivRD->field_begin(), 1));
+  LValue SLBase;
+  if (HasShared)
+    SLBase = CGF.MakeAddrLValue(SL, SharedsTy);
+
+  for (unsigned k = 0, e = Caps.size(); k < e; ++k) {
+    const TaskUnpackedCapture &Cap = Caps[k];
+    llvm::Value *Val = CGF.EmitLoadOfScalar(
+        CGF.MakeAddrLValue(CGF.GetAddrOfLocalVar(ParamDecls[k]), Cap.Ty), Loc);
+    switch (Cap.Kind) {
+    case TaskUnpackedCapture::FIRSTPRIVATE:
+      CGF.EmitStoreOfScalar(Val, CGF.EmitLValueForField(PrivBase, Cap.Field));
+      break;
+    case TaskUnpackedCapture::SHARED_ADDR:
+      CGF.EmitStoreOfScalar(Val, CGF.EmitLValueForField(SLBase, Cap.Field));
+      break;
+    case TaskUnpackedCapture::SHARED_PTR: {
+      // ptmp = param; shareds.<field> = &ptmp, so the outlined body's double
+      // load (&p -> p) yields the parameter. SROA promotes ptmp once SL is
+      // scalarized, leaving the loop base == the parameter.
+      Address PTmp = CGF.CreateMemTemp(Cap.Ty, "shared.ptr");
+      CGF.EmitStoreOfScalar(Val, CGF.MakeAddrLValue(PTmp, Cap.Ty));
+      CGF.EmitStoreOfScalar(
+          CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
+              PTmp.emitRawPointer(CGF),
+              CGF.ConvertTypeForMem(Cap.Field->getType())),
+          CGF.EmitLValueForField(SLBase, Cap.Field));
+      break;
+    }
+    }
+  }
+
+  emitOutlinedTaskCall(CGM, CGF, Loc, Kind, TDBase, KmpTaskTWithPrivatesQTy,
+                       KmpTaskTQTy, SharedsPtrTy, TaskFunction, TaskPrivatesMap,
+                       /*GtidParam=*/llvm::ConstantInt::get(CGF.Int32Ty, 0));
+  CGF.FinishFunction();
+  return Fn;
+}
+
+/// Emit the scatter helper for an unpacked-eligible task:
+///   void .omp_task_scatter.(kmp_task_t *tt, void **out)
+/// filling out[k] with the &value slot the kernel's k-th parameter is loaded from
+/// (see TaskUnpackedCapture): &tt->privates.<f> for firstprivate, &shareds-><f> for
+/// a shared array/scalar/struct, and shareds-><f> (== &p) for a shared pointer.
+/// The runtime calls this once right after allocation to populate the task's
+/// stable args array, so the recorded PROG's args are the per-value slots
+/// prog-fuse needs (args[k] == &value).
+static llvm::Function *emitTaskUnpackedScatter(CodeGenModule &CGM, SourceLocation Loc,
+                                           QualType KmpTaskTWithPrivatesQTy,
+                                           QualType KmpTaskTQTy,
+                                           QualType SharedsTy,
+                                           QualType SharedsPtrTy,
+                                           ArrayRef<TaskUnpackedCapture> Caps) {
+  ASTContext &C = CGM.getContext();
+  const auto *WithPrivRD = KmpTaskTWithPrivatesQTy->castAsRecordDecl();
+  const auto *KmpTaskTQTyRD = KmpTaskTQTy->castAsRecordDecl();
+  QualType WithPrivPtrQTy = C.getPointerType(KmpTaskTWithPrivatesQTy);
+  QualType VoidPtrPtrTy = C.getPointerType(C.VoidPtrTy);
+
+  bool HasShared = false, HasFirstprivate = false;
+  for (const TaskUnpackedCapture &Cap : Caps) {
+    if (Cap.Kind == TaskUnpackedCapture::FIRSTPRIVATE)
+      HasFirstprivate = true;
+    else
+      HasShared = true;
+  }
+
+  auto *BaseArg = ImplicitParamDecl::Create(
+      C, /*DC=*/nullptr, Loc, /*Id=*/nullptr, C.VoidPtrTy,
+      ImplicitParamKind::Other);
+  auto *OutArg = ImplicitParamDecl::Create(
+      C, /*DC=*/nullptr, Loc, /*Id=*/nullptr, VoidPtrPtrTy,
+      ImplicitParamKind::Other);
+  FunctionArgList Args{BaseArg, OutArg};
+  const auto &FnInfo =
+      CGM.getTypes().arrangeBuiltinFunctionDeclaration(C.VoidTy, Args);
+  llvm::FunctionType *FnTy = CGM.getTypes().GetFunctionType(FnInfo);
+  std::string Name = CGM.getOpenMPRuntime().getName({"omp_task_scatter", ""});
+  auto *Fn = llvm::Function::Create(FnTy, llvm::GlobalValue::InternalLinkage,
+                                    Name, &CGM.getModule());
+  CGM.SetInternalFunctionAttributes(GlobalDecl(), Fn, FnInfo);
+  Fn->setDoesNotRecurse();
+  CodeGenFunction CGF(CGM);
+  CGF.StartFunction(GlobalDecl(), C.VoidTy, Fn, FnInfo, Args, Loc, Loc);
+
+  llvm::Value *BaseVoid =
+      CGF.Builder.CreateLoad(CGF.GetAddrOfLocalVar(BaseArg));
+  Address TTAddr = CGF.CreateMemTemp(WithPrivPtrQTy, "tt.addr");
+  CGF.Builder.CreateStore(
+      CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
+          BaseVoid, CGF.ConvertTypeForMem(WithPrivPtrQTy)),
+      TTAddr);
+  LValue TDBase =
+      CGF.EmitLoadOfPointerLValue(TTAddr, WithPrivPtrQTy->castAs<PointerType>());
+  LValue TaskData = CGF.EmitLValueForField(TDBase, *WithPrivRD->field_begin());
+
+  LValue PrivBase;
+  if (HasFirstprivate)
+    PrivBase = CGF.EmitLValueForField(TDBase, *std::next(WithPrivRD->field_begin(), 1));
+  LValue SharedsBase;
+  if (HasShared) {
+    llvm::Value *SharedsVoid = CGF.EmitLoadOfScalar(
+        CGF.EmitLValueForField(
+            TaskData, *std::next(KmpTaskTQTyRD->field_begin(), KmpTaskTShareds)),
+        Loc);
+    llvm::Value *SharedsPtr = CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
+        SharedsVoid, CGF.ConvertTypeForMem(SharedsPtrTy));
+    SharedsBase = CGF.MakeNaturalAlignAddrLValue(SharedsPtr, SharedsTy);
+  }
+
+  llvm::Value *OutPtr = CGF.Builder.CreateLoad(CGF.GetAddrOfLocalVar(OutArg));
+  for (unsigned k = 0, e = Caps.size(); k < e; ++k) {
+    const TaskUnpackedCapture &Cap = Caps[k];
+    llvm::Value *V;
+    switch (Cap.Kind) {
+    case TaskUnpackedCapture::FIRSTPRIVATE:
+      V = CGF.EmitLValueForField(PrivBase, Cap.Field).getPointer(CGF);
+      break;
+    case TaskUnpackedCapture::SHARED_ADDR:
+      V = CGF.EmitLValueForField(SharedsBase, Cap.Field).getPointer(CGF);
+      break;
+    case TaskUnpackedCapture::SHARED_PTR:
+      // the field value is &p; its deref is the pointer the kernel param wants
+      V = CGF.EmitLoadOfScalar(CGF.EmitLValueForField(SharedsBase, Cap.Field),
+                               Loc);
+      break;
+    }
+    llvm::Value *Addr =
+        CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(V, CGF.VoidPtrTy);
+    llvm::Value *Slot =
+        CGF.Builder.CreateConstInBoundsGEP1_64(CGF.VoidPtrTy, OutPtr, k);
+    CGF.Builder.CreateAlignedStore(Addr, Slot, CGF.getPointerAlign());
+  }
+  CGF.FinishFunction();
+  return Fn;
+}
+
 CGOpenMPRuntime::TaskResultTy
 CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
                               const OMPExecutableDirective &D,
@@ -3864,12 +4533,59 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
     TaskPrivatesMap = llvm::ConstantPointerNull::get(
         cast<llvm::PointerType>(TaskPrivatesMapTy));
   }
-  // Build a proxy function kmp_int32 .omp_task_entry.(kmp_int32 gtid,
-  // kmp_task_t *tt);
+  // Do we need destructors for the private copies?  (computed here so the
+  // unpacked-form eligibility below can see it; reused for the task flags.)
+  bool NeedsCleanup = false;
+  if (!Privates.empty())
+    NeedsCleanup =
+        checkDestructorsRequired(KmpTaskTWithPrivatesQTyRD, Privates);
+
+  // Every task's ahead-of-time routine (kmp_task->routine) is the standard
+  // libomp proxy `kmp_int32 .omp_task_entry.(gtid, tt)` -- run directly and on
+  // non-JIT taskgraph replay. In ADDITION, the body is forwarded to CGIR as a
+  // uniform void(void**) `.omp_task_kernel.` for JIT/prog-fuse, in one of two
+  // shapes:
+  //   - Unpacked form (fusable): for a plain, tied task whose captures are all
+  //     firstprivate scalars, emit `void .omp_task_kernel.(<caps...>)` (one
+  //     deduplicable per-value parameter) plus a `.omp_task_scatter.` that fills
+  //     the args array with &value slots. This exposes the captured scalars as
+  //     deduplicable args so CGIR can fuse consecutive task bodies at the LOOP
+  //     level.
+  //   - Packed form: otherwise, the `void .omp_task_kernel.(void**)` kernel with
+  //     args[0] == kmp_task_t* (captures reached indirectly through tt); fusion
+  //     stays at the PROGRAM level.
+  const RecordDecl *PrivatesRD =
+      Privates.empty()
+          ? nullptr
+          : std::next(KmpTaskTWithPrivatesQTyRD->field_begin(), 1)
+                ->getType()
+                ->castAsRecordDecl();
+  SmallVector<TaskUnpackedCapture, 8> UnpackedCaps;
+  const bool UnpackedForm = collectTaskUnpackedCaptures(
+      CGF, D, Data, Privates, PrivatesRD, NeedsCleanup, UnpackedCaps);
+
+  // The ahead-of-time routine (kmp_task->routine), for every task.
   llvm::Function *TaskEntry = emitProxyTaskFunction(
       CGM, Loc, D.getDirectiveKind(), KmpInt32Ty, KmpTaskTWithPrivatesPtrQTy,
       KmpTaskTWithPrivatesQTy, KmpTaskTQTy, SharedsPtrTy, TaskFunction,
       TaskPrivatesMap);
+
+  // The void(void**) kernel forwarded to CGIR for JIT/prog-fuse, plus the scatter
+  // for the unpacked form.
+  llvm::Function *TaskIRKernel = nullptr;
+  llvm::Function *ScatterFn = nullptr;
+  if (UnpackedForm) {
+    // (The task's .omp_task_privates_map. is force-inlined into the kernel later,
+    // in optimizeTaskClosure, so the reconstructed privates struct scalarizes.)
+    TaskIRKernel = emitTaskUnpackedKernel(
+        CGM, Loc, D.getDirectiveKind(), KmpTaskTWithPrivatesQTy, KmpTaskTQTy,
+        SharedsTy, SharedsPtrTy, TaskFunction, TaskPrivatesMap, UnpackedCaps);
+    ScatterFn = emitTaskUnpackedScatter(CGM, Loc, KmpTaskTWithPrivatesQTy,
+                                        KmpTaskTQTy, SharedsTy, SharedsPtrTy,
+                                        UnpackedCaps);
+  } else {
+    TaskIRKernel = emitPackedTaskKernel(CGM, Loc, TaskEntry);
+  }
 
   // Build call kmp_task_t * __kmpc_omp_task_alloc(ident_t *, kmp_int32 gtid,
   // kmp_int32 flags, size_t sizeof_kmp_task_t, size_t sizeof_shareds,
@@ -3887,13 +4603,8 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
     TransparentFlag = 0x100,
   };
   unsigned Flags = Data.Tied ? TiedFlag : 0;
-  bool NeedsCleanup = false;
-  if (!Privates.empty()) {
-    NeedsCleanup =
-        checkDestructorsRequired(KmpTaskTWithPrivatesQTyRD, Privates);
-    if (NeedsCleanup)
-      Flags = Flags | DestructorsFlag;
-  }
+  if (NeedsCleanup)
+    Flags = Flags | DestructorsFlag;
   if (const auto *Clause = D.getSingleClause<OMPThreadsetClause>()) {
     OpenMPThreadsetKind Kind = Clause->getThreadsetKind();
     if (Kind == OMPC_THREADSET_omp_pool)
@@ -3934,6 +4645,36 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
       });
   llvm::Value *Nacs = llvm::ConstantInt::get(CGF.Int32Ty, NumAccesses);
 
+  // Forward the task body's LLVM-IR (the void(void**) `.omp_task_kernel.`) to the
+  // runtime so it can be JIT-compiled/fused. For the unpacked form this is the
+  // kernel with individual per-value parameters, which is what prog-fuse
+  // deduplicates/fuses; for the packed form it is the args[0]==tt kernel. The
+  // ahead-of-time `.omp_task_entry.` proxy (kmp_task_t::routine) is not the
+  // forwarded IR -- the runtime holds it for direct/non-JIT execution. In both
+  // cases we also embed a resolution table for the mutable globals the body
+  // references (so the JIT binds them to the real objects). Target directives have
+  // no device IR in the host module, so they pass null/0 here (the device IR is
+  // forwarded separately, see emitTargetKernelSourceIR).
+  const bool EmbedTaskIR =
+      !isOpenMPTargetExecutionDirective(D.getDirectiveKind()) &&
+      !isOpenMPTargetDataManagementDirective(D.getDirectiveKind());
+  TaskSourceIR TaskIR =
+      emitTaskSourceIR(CGM, EmbedTaskIR ? TaskIRKernel : /*Fn=*/nullptr);
+  llvm::Constant *TaskIRPtr = TaskIR.IRPtr;
+  llvm::Value *TaskIRSize = TaskIR.IRSize;
+  llvm::Constant *TaskIRExternsPtr = TaskIR.ExternsPtr;
+  llvm::Value *TaskIRExternsCount = TaskIR.ExternsCount;
+
+  // Unpacked-form extras forwarded to the alloc call: the number of &value arg
+  // slots and the scatter helper that fills them. The packed form passes 1 slot
+  // (args[0] == kmp_task_t*) and a null scatter (the runtime fills it itself).
+  llvm::Value *UnpackedNArgs =
+      llvm::ConstantInt::get(CGF.SizeTy, UnpackedForm ? UnpackedCaps.size() : 1);
+  llvm::Value *ScatterArg =
+      UnpackedForm ? CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(ScatterFn,
+                                                                     CGF.VoidPtrTy)
+                   : llvm::ConstantPointerNull::get(CGF.VoidPtrTy);
+
   // Arguments of the func call
   SmallVector<llvm::Value *, 10> AllocArgs = {
       emitUpdateLocation(CGF, Loc),
@@ -3962,6 +4703,12 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
     AllocArgs.push_back(DeviceID);
     AllocArgs.push_back(Ndeps);
     AllocArgs.push_back(Nacs);
+    AllocArgs.push_back(TaskIRPtr);
+    AllocArgs.push_back(TaskIRSize);
+    AllocArgs.push_back(TaskIRExternsPtr);
+    AllocArgs.push_back(TaskIRExternsCount);
+    AllocArgs.push_back(UnpackedNArgs);
+    AllocArgs.push_back(ScatterArg);
     NewTask = CGF.EmitRuntimeCall(
         OMPBuilder.getOrCreateRuntimeFunction(
             CGM.getModule(), OMPRTL___kmpc_omp_target_task_alloc_with_deps),
@@ -3970,6 +4717,12 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
   } else {
     AllocArgs.push_back(Ndeps);
     AllocArgs.push_back(Nacs);
+    AllocArgs.push_back(TaskIRPtr);
+    AllocArgs.push_back(TaskIRSize);
+    AllocArgs.push_back(TaskIRExternsPtr);
+    AllocArgs.push_back(TaskIRExternsCount);
+    AllocArgs.push_back(UnpackedNArgs);
+    AllocArgs.push_back(ScatterArg);
     NewTask =
         CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
                                 CGM.getModule(), OMPRTL___kmpc_omp_task_alloc_with_deps),
@@ -4890,8 +5643,8 @@ void CGOpenMPRuntime::emitTaskCall(CodeGenFunction &CGF, SourceLocation Loc,
     }
   }
   auto &M = CGM.getModule();
-  auto &&ElseCodeGen = [this, &M, &TaskArgs, ThreadID, NewTaskNewTaskTTy,
-                        TaskEntry, &DepWaitTaskArgs, UseV2Wait,
+  auto &&ElseCodeGen = [this, &M, &TaskArgs, &Result, NewTaskNewTaskTTy,
+                        TaskEntry, ThreadID, &DepWaitTaskArgs, UseV2Wait,
                         HasDepsOrAccesses, Loc](CodeGenFunction &CGF, PrePostActionTy &) {
     CodeGenFunction::RunCleanupsScope LocalScope(CGF);
     // Wait on deps and/or accesses before inlining the task body.
@@ -4909,7 +5662,8 @@ void CGOpenMPRuntime::emitTaskCall(CodeGenFunction &CGF, SourceLocation Loc,
                             Args7);
       }
     }
-    // Call proxy_task_entry(gtid, new_task);
+    // Undeferred (if0) task: invoke the task's ahead-of-time routine directly on
+    // the standard libomp ABI, .omp_task_entry.(gtid, tt).
     auto &&CodeGen = [TaskEntry, ThreadID, NewTaskNewTaskTTy,
                       Loc](CodeGenFunction &CGF, PrePostActionTy &Action) {
       Action.Enter(CGF);
@@ -6595,6 +7349,11 @@ void CGOpenMPRuntime::emitTargetOutlinedFunctionHelper(
     return;
 
   CGM.getTargetCodeGenInfo().setTargetAttributes(nullptr, OutlinedFn, CGM);
+
+  // On device compilation, embed the kernel's LLVM-IR into the device image so
+  // the host runtime can forward it to XKOMP (see emitTargetKernelSourceIR).
+  if (CGM.getLangOpts().OpenMPIsTargetDevice && IsOffloadEntry)
+    emitTargetKernelSourceIR(CGM, OutlinedFn);
 
   for (auto *C : D.getClausesOfKind<OMPXAttributeClause>()) {
     for (auto *A : C->getAttrs()) {
@@ -11074,9 +11833,18 @@ static void genMapInfoForAccessClauses(
       const Decl *CanonDecl = AccessVD->getCanonicalDecl();
 
       // Search existing map entries for one that refers to the same variable
-      // and add the OMP_MAP_ACCESS flag to it. The variable should already
-      // be captured and present in CombinedInfo from genMapInfoForCaptures.
-      bool Found = false;
+      // and add the OMP_MAP_ACCESS flag to it.
+      //
+      // If no matching entry is found, the variable is named in an 'access'
+      // clause but is not referenced inside the target region, so it was never
+      // captured. That is allowed: the access still registers a data
+      // dependency with the runtime (it is appended to Data.Accesses /
+      // acs_list[] by buildAccesses, see CGStmtOpenMP), but since the variable
+      // is not a kernel argument there is no device pointer to resolve and
+      // nothing to flag here. Such unreferenced accesses are kept at the tail
+      // of the reordered access list, so the runtime's per-OMP_MAP_ACCESS
+      // indexing of the captured variables (xkomp_access_pointer) stays
+      // aligned. Simply skip it.
       for (unsigned I = 0, N = CombinedInfo.Exprs.size(); I < N; ++I) {
         const ValueDecl *EntryVD = CombinedInfo.Exprs[I].getMapDecl();
         if (!EntryVD)
@@ -11099,13 +11867,9 @@ static void genMapInfoForAccessClauses(
             CombinedInfo.Sizes[I] = SectionSize;
           }
 
-          Found = true;
           break;
         }
       }
-      (void)Found;
-      assert(Found && "Access clause variable not found in map entries — "
-                      "it should be captured by the target region");
     }
   }
 }

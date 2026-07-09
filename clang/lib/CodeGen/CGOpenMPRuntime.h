@@ -564,6 +564,8 @@ protected:
 
   struct TaskResultTy {
     llvm::Value *NewTask = nullptr;
+    // The task's ahead-of-time routine, the standard libomp proxy
+    // kmp_int32 .omp_task_entry.(kmp_int32 gtid, kmp_task_t *tt).
     llvm::Function *TaskEntry = nullptr;
     llvm::Value *NewTaskNewTaskTTy = nullptr;
     LValue TDBase;
