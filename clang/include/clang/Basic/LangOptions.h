@@ -194,6 +194,16 @@ public:
     SYCL_Default = SYCL_2020
   };
 
+  /// Selects the ABI of the args buffer forwarded for an OpenMP task body's
+  /// JIT/fusion (see CGOpenMPRuntime task codegen).
+  enum OpenMPTaskJitTypeKind {
+    /// void(void**): args is an array of pointers (args[k] == &value). Default.
+    OMPTaskJit_Pointers,
+    /// void(void*, size_t): args is a packed byte buffer (leading by-reference
+    /// pointers, then inline by-value copies).
+    OMPTaskJit_Packed
+  };
+
   enum HLSLLangStd {
     HLSL_Unset = 0,
     HLSL_2015 = 2015,

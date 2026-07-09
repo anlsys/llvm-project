@@ -4437,6 +4437,39 @@ static llvm::Function *emitTaskUnpackedScatter(CodeGenModule &CGM, SourceLocatio
   return Fn;
 }
 
+/// Emit the per-parameter descriptor table forwarded to the runtime so CGIR's
+/// prog-fuse can deduplicate references by pointer and copies by value:
+///   struct { i32 kind; size_t size; } .omp_task_params.<Fn>[N]
+/// laid out exactly as cgir_command_prog_param_t. kind is 1 (COPY) for a
+/// firstprivate, 0 (REFERENCE) for a shared capture; size is the value's byte
+/// size (pointer size for references). Returns {ptr, count}; {null, 0} if empty.
+static std::pair<llvm::Constant *, llvm::Value *>
+emitTaskParamsTable(CodeGenModule &CGM, llvm::Function *Fn,
+                    ArrayRef<TaskUnpackedCapture> Caps) {
+  llvm::Constant *NullPtr = llvm::ConstantPointerNull::get(CGM.Int8PtrTy);
+  llvm::Value *Zero = llvm::ConstantInt::get(CGM.SizeTy, 0);
+  if (Caps.empty())
+    return {NullPtr, Zero};
+  llvm::StructType *EntryTy = llvm::StructType::get(CGM.Int32Ty, CGM.SizeTy);
+  llvm::SmallVector<llvm::Constant *, 8> Entries;
+  Entries.reserve(Caps.size());
+  for (const TaskUnpackedCapture &Cap : Caps) {
+    bool IsCopy = Cap.Kind == TaskUnpackedCapture::FIRSTPRIVATE;
+    uint64_t Size = IsCopy ? CGM.getContext().getTypeSizeInChars(Cap.Ty).getQuantity()
+                           : CGM.getDataLayout().getPointerSize();
+    Entries.push_back(llvm::ConstantStruct::get(
+        EntryTy, {llvm::ConstantInt::get(CGM.Int32Ty, IsCopy ? 1 : 0),
+                  llvm::ConstantInt::get(CGM.SizeTy, Size)}));
+  }
+  llvm::ArrayType *ArrTy = llvm::ArrayType::get(EntryTy, Entries.size());
+  auto *GV = new llvm::GlobalVariable(
+      CGM.getModule(), ArrTy, /*isConstant=*/true,
+      llvm::GlobalValue::PrivateLinkage, llvm::ConstantArray::get(ArrTy, Entries),
+      llvm::Twine(".omp_task_params.") + Fn->getName());
+  GV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+  return {GV, llvm::ConstantInt::get(CGM.SizeTy, Entries.size())};
+}
+
 CGOpenMPRuntime::TaskResultTy
 CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
                               const OMPExecutableDirective &D,
@@ -4675,6 +4708,18 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
                                                                      CGF.VoidPtrTy)
                    : llvm::ConstantPointerNull::get(CGF.VoidPtrTy);
 
+  // Per-parameter descriptor table (kind + size), so prog-fuse can deduplicate
+  // references by pointer and copies by value. Only the unpacked form has
+  // individual parameters; the packed form passes null/0.
+  llvm::Constant *TaskParamsPtr =
+      llvm::ConstantPointerNull::get(CGM.Int8PtrTy);
+  llvm::Value *TaskParamsCount = llvm::ConstantInt::get(CGF.SizeTy, 0);
+  if (EmbedTaskIR && UnpackedForm) {
+    auto PT = emitTaskParamsTable(CGM, TaskIRKernel, UnpackedCaps);
+    TaskParamsPtr = PT.first;
+    TaskParamsCount = PT.second;
+  }
+
   // Arguments of the func call
   SmallVector<llvm::Value *, 10> AllocArgs = {
       emitUpdateLocation(CGF, Loc),
@@ -4709,6 +4754,8 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
     AllocArgs.push_back(TaskIRExternsCount);
     AllocArgs.push_back(UnpackedNArgs);
     AllocArgs.push_back(ScatterArg);
+    AllocArgs.push_back(TaskParamsPtr);
+    AllocArgs.push_back(TaskParamsCount);
     NewTask = CGF.EmitRuntimeCall(
         OMPBuilder.getOrCreateRuntimeFunction(
             CGM.getModule(), OMPRTL___kmpc_omp_target_task_alloc_with_deps),
@@ -4723,6 +4770,8 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
     AllocArgs.push_back(TaskIRExternsCount);
     AllocArgs.push_back(UnpackedNArgs);
     AllocArgs.push_back(ScatterArg);
+    AllocArgs.push_back(TaskParamsPtr);
+    AllocArgs.push_back(TaskParamsCount);
     NewTask =
         CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
                                 CGM.getModule(), OMPRTL___kmpc_omp_task_alloc_with_deps),
