@@ -4172,7 +4172,7 @@ static bool collectTaskUnpackedCaptures(CodeGenFunction &CGF,
                                     const OMPTaskDataTy &Data,
                                     ArrayRef<PrivateDataTy> Privates,
                                     const RecordDecl *PrivatesRD,
-                                    bool NeedsCleanup,
+                                    bool NeedsCleanup, bool AllowAggregate,
                                     SmallVectorImpl<TaskUnpackedCapture> &Out) {
   if (D.getDirectiveKind() != OMPD_task)
     return false;
@@ -4200,9 +4200,17 @@ static bool collectTaskUnpackedCaptures(CodeGenFunction &CGF,
     if (Pair.second.PrivateElemInit) { // firstprivate
       assert(PrivatesRD && "firstprivate without a privates record");
       const FieldDecl *FD = *std::next(PrivatesRD->field_begin(), Idx);
-      if (!FD->getType()->isScalarType())
+      QualType FT = FD->getType();
+      // A scalar firstprivate is always fusable. A non-scalar (aggregate/array)
+      // firstprivate is supported only by the packed ABI (AllowAggregate): the
+      // self-contained packed kernel memcpys it from the buffer, sidestepping the
+      // individual-param kernel's by-value C-ABI coercion. Require trivially-
+      // copyable so a plain byte copy is the correct firstprivate initialization.
+      if (!FT->isScalarType() &&
+          !(AllowAggregate && !FT->isIncompleteType() &&
+            FT.isTriviallyCopyableType(CGF.getContext())))
         return false;
-      Out.push_back({TaskUnpackedCapture::FIRSTPRIVATE, FD, FD->getType()});
+      Out.push_back({TaskUnpackedCapture::FIRSTPRIVATE, FD, FT});
     }
     ++Idx;
   }
@@ -4437,29 +4445,195 @@ static llvm::Function *emitTaskUnpackedScatter(CodeGenModule &CGM, SourceLocatio
   return Fn;
 }
 
+/// Emit the self-contained packed-buffer kernel for a packed-ABI task
+/// (-fopenmp-task-jit-type=packed):
+///   void .omp_task_kernel.(i8 *buf, i64 size)
+/// It rebuilds a local KmpTaskTWithPrivates (+ a local shareds record if there
+/// are shared captures) by reading each capture from `buf` at its fixed offset
+/// (see computeTaskPackedLayout / TaskUnpackedCapture) and runs the SAME outlined
+/// body via emitOutlinedTaskCall. A firstprivate copy (scalar OR trivially-
+/// copyable aggregate) is memcpy'd from the buffer -- which is why aggregates work
+/// here but not in the individual-parameter kernel (by-value C-ABI coercion). A
+/// shared capture's pointer is loaded from the buffer (SHARED_ADDR straight into
+/// the shareds field; SHARED_PTR via a local so the body's double-load resolves).
+static llvm::Function *
+emitTaskPackedBufferKernel(CodeGenModule &CGM, SourceLocation Loc,
+                   OpenMPDirectiveKind Kind, QualType KmpTaskTWithPrivatesQTy,
+                   QualType KmpTaskTQTy, QualType SharedsTy, QualType SharedsPtrTy,
+                   llvm::Function *TaskFunction, llvm::Value *TaskPrivatesMap,
+                   ArrayRef<TaskUnpackedCapture> Caps, ArrayRef<uint64_t> Offsets) {
+  ASTContext &C = CGM.getContext();
+  const auto *WithPrivRD = KmpTaskTWithPrivatesQTy->castAsRecordDecl();
+  const auto *KmpTaskTQTyRD = KmpTaskTQTy->castAsRecordDecl();
+  assert(Offsets.size() == Caps.size() && "caps/offsets length mismatch");
+
+  bool HasShared = false, HasFirstprivate = false;
+  for (const TaskUnpackedCapture &Cap : Caps) {
+    if (Cap.Kind == TaskUnpackedCapture::FIRSTPRIVATE)
+      HasFirstprivate = true;
+    else
+      HasShared = true;
+  }
+
+  auto *BufArg = ImplicitParamDecl::Create(
+      C, /*DC=*/nullptr, Loc, /*Id=*/nullptr, C.VoidPtrTy,
+      ImplicitParamKind::Other);
+  auto *SizeArg = ImplicitParamDecl::Create(
+      C, /*DC=*/nullptr, Loc, /*Id=*/nullptr, C.getSizeType(),
+      ImplicitParamKind::Other);
+  FunctionArgList Args{BufArg, SizeArg};
+  const auto &FnInfo =
+      CGM.getTypes().arrangeBuiltinFunctionDeclaration(C.VoidTy, Args);
+  llvm::FunctionType *FnTy = CGM.getTypes().GetFunctionType(FnInfo);
+  std::string Name = CGM.getOpenMPRuntime().getName({"omp_task_kernel", ""});
+  auto *Fn = llvm::Function::Create(FnTy, llvm::GlobalValue::InternalLinkage,
+                                    Name, &CGM.getModule());
+  CGM.SetInternalFunctionAttributes(GlobalDecl(), Fn, FnInfo);
+  Fn->setDoesNotRecurse();
+  CodeGenFunction CGF(CGM);
+  CGF.StartFunction(GlobalDecl(), C.VoidTy, Fn, FnInfo, Args, Loc, Loc);
+
+  llvm::Value *Buf = CGF.Builder.CreateLoad(CGF.GetAddrOfLocalVar(BufArg));
+
+  // Local KmpTaskTWithPrivates base (+ a local shareds record if needed).
+  Address TL = CGF.CreateMemTemp(KmpTaskTWithPrivatesQTy, "task.packed");
+  LValue TDBase = CGF.MakeAddrLValue(TL, KmpTaskTWithPrivatesQTy);
+  LValue TaskData = CGF.EmitLValueForField(TDBase, *WithPrivRD->field_begin());
+
+  Address SL = Address::invalid();
+  if (HasShared)
+    SL = CGF.CreateMemTemp(SharedsTy, "shareds.packed");
+  CGF.EmitStoreOfScalar(
+      HasShared ? CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
+                      SL.emitRawPointer(CGF), CGF.VoidPtrTy)
+                : llvm::ConstantPointerNull::get(CGF.VoidPtrTy),
+      CGF.EmitLValueForField(
+          TaskData, *std::next(KmpTaskTQTyRD->field_begin(), KmpTaskTShareds)));
+  CGF.EmitStoreOfScalar(
+      llvm::ConstantInt::get(CGF.Int32Ty, 0),
+      CGF.EmitLValueForField(
+          TaskData, *std::next(KmpTaskTQTyRD->field_begin(), KmpTaskTPartId)));
+
+  LValue PrivBase;
+  if (HasFirstprivate)
+    PrivBase = CGF.EmitLValueForField(TDBase, *std::next(WithPrivRD->field_begin(), 1));
+  LValue SLBase;
+  if (HasShared)
+    SLBase = CGF.MakeAddrLValue(SL, SharedsTy);
+
+  for (unsigned k = 0, e = Caps.size(); k < e; ++k) {
+    const TaskUnpackedCapture &Cap = Caps[k];
+    llvm::Value *Slot =
+        CGF.Builder.CreateConstInBoundsGEP1_64(CGF.Int8Ty, Buf, Offsets[k]);
+    switch (Cap.Kind) {
+    case TaskUnpackedCapture::FIRSTPRIVATE: {
+      // memcpy the value bytes (scalar or trivially-copyable aggregate) from the
+      // buffer into the privates field.
+      llvm::Value *Dst =
+          CGF.EmitLValueForField(PrivBase, Cap.Field).getPointer(CGF);
+      Address DstAddr(Dst, CGF.ConvertTypeForMem(Cap.Ty),
+                      C.getTypeAlignInChars(Cap.Ty));
+      Address SlotAddr(Slot, CGF.Int8Ty, CharUnits::One());
+      CGF.Builder.CreateMemCpy(
+          DstAddr, SlotAddr,
+          llvm::ConstantInt::get(
+              CGF.Int64Ty, C.getTypeSizeInChars(Cap.Ty).getQuantity()));
+      break;
+    }
+    case TaskUnpackedCapture::SHARED_ADDR: {
+      llvm::Value *Ptr = CGF.Builder.CreateAlignedLoad(
+          CGF.ConvertTypeForMem(Cap.Field->getType()), Slot, llvm::Align(1));
+      CGF.EmitStoreOfScalar(Ptr, CGF.EmitLValueForField(SLBase, Cap.Field));
+      break;
+    }
+    case TaskUnpackedCapture::SHARED_PTR: {
+      // buffer holds the pointer value p; ptmp = p; shareds.<field> = &ptmp so
+      // the outlined body's double load (&p -> p) yields p.
+      llvm::Value *P = CGF.Builder.CreateAlignedLoad(
+          CGF.ConvertTypeForMem(Cap.Ty), Slot, llvm::Align(1));
+      Address PTmp = CGF.CreateMemTemp(Cap.Ty, "shared.ptr");
+      CGF.EmitStoreOfScalar(P, CGF.MakeAddrLValue(PTmp, Cap.Ty));
+      CGF.EmitStoreOfScalar(
+          CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
+              PTmp.emitRawPointer(CGF),
+              CGF.ConvertTypeForMem(Cap.Field->getType())),
+          CGF.EmitLValueForField(SLBase, Cap.Field));
+      break;
+    }
+    }
+  }
+
+  emitOutlinedTaskCall(CGM, CGF, Loc, Kind, TDBase, KmpTaskTWithPrivatesQTy,
+                       KmpTaskTQTy, SharedsPtrTy, TaskFunction, TaskPrivatesMap,
+                       /*GtidParam=*/llvm::ConstantInt::get(CGF.Int32Ty, 0));
+  CGF.FinishFunction();
+  return Fn;
+}
+
+/// Compute the natural-aligned packed-buffer layout of the captures: fills
+/// Offsets[k] with the byte offset of capture k and returns the total buffer
+/// size. A copy (firstprivate) occupies its value size/alignment; a reference
+/// (shared) occupies a pointer. This is the single source of truth shared by the
+/// packed kernel (which reads at these offsets), the params table (forwarded to
+/// the runtime), and CGIR's fuse/jit passes (which pack/reconstruct here).
+static uint64_t
+computeTaskPackedLayout(CodeGenModule &CGM, ArrayRef<TaskUnpackedCapture> Caps,
+                        SmallVectorImpl<uint64_t> &Offsets) {
+  ASTContext &C = CGM.getContext();
+  const uint64_t PtrSize = CGM.getDataLayout().getPointerSize();
+  const uint64_t PtrAlign = CGM.getDataLayout().getPointerABIAlignment(0).value();
+  Offsets.assign(Caps.size(), 0);
+  uint64_t Cursor = 0;
+  for (unsigned k = 0, e = Caps.size(); k < e; ++k) {
+    const TaskUnpackedCapture &Cap = Caps[k];
+    uint64_t Size, Align;
+    if (Cap.Kind == TaskUnpackedCapture::FIRSTPRIVATE) {
+      Size = C.getTypeSizeInChars(Cap.Ty).getQuantity();
+      Align = C.getTypeAlignInChars(Cap.Ty).getQuantity();
+    } else { // SHARED_ADDR / SHARED_PTR: the slot holds a pointer
+      Size = PtrSize;
+      Align = PtrAlign;
+    }
+    if (Align == 0)
+      Align = 1;
+    Cursor = (Cursor + Align - 1) & ~(Align - 1);
+    Offsets[k] = Cursor;
+    Cursor += Size;
+  }
+  return Cursor ? Cursor : 1;
+}
+
 /// Emit the per-parameter descriptor table forwarded to the runtime so CGIR's
-/// prog-fuse can deduplicate references by pointer and copies by value:
-///   struct { i32 kind; size_t size; } .omp_task_params.<Fn>[N]
+/// prog-fuse can deduplicate references by pointer and copies by value, and
+/// pack/reconstruct the per-task buffer:
+///   struct { i32 kind; size_t size; size_t offset; } .omp_task_params.<Fn>[N]
 /// laid out exactly as cgir_command_prog_param_t. kind is 1 (COPY) for a
 /// firstprivate, 0 (REFERENCE) for a shared capture; size is the value's byte
-/// size (pointer size for references). Returns {ptr, count}; {null, 0} if empty.
+/// size (pointer size for references); offset is the byte offset in the packed
+/// buffer (computeTaskPackedLayout; unused by the pointers ABI). Offsets[k] must
+/// correspond to Caps[k]. Returns {ptr, count}; {null, 0} if empty.
 static std::pair<llvm::Constant *, llvm::Value *>
 emitTaskParamsTable(CodeGenModule &CGM, llvm::Function *Fn,
-                    ArrayRef<TaskUnpackedCapture> Caps) {
+                    ArrayRef<TaskUnpackedCapture> Caps,
+                    ArrayRef<uint64_t> Offsets) {
   llvm::Constant *NullPtr = llvm::ConstantPointerNull::get(CGM.Int8PtrTy);
   llvm::Value *Zero = llvm::ConstantInt::get(CGM.SizeTy, 0);
   if (Caps.empty())
     return {NullPtr, Zero};
-  llvm::StructType *EntryTy = llvm::StructType::get(CGM.Int32Ty, CGM.SizeTy);
+  assert(Offsets.size() == Caps.size() && "params/offsets length mismatch");
+  llvm::StructType *EntryTy =
+      llvm::StructType::get(CGM.Int32Ty, CGM.SizeTy, CGM.SizeTy);
   llvm::SmallVector<llvm::Constant *, 8> Entries;
   Entries.reserve(Caps.size());
-  for (const TaskUnpackedCapture &Cap : Caps) {
+  for (unsigned k = 0, e = Caps.size(); k < e; ++k) {
+    const TaskUnpackedCapture &Cap = Caps[k];
     bool IsCopy = Cap.Kind == TaskUnpackedCapture::FIRSTPRIVATE;
     uint64_t Size = IsCopy ? CGM.getContext().getTypeSizeInChars(Cap.Ty).getQuantity()
                            : CGM.getDataLayout().getPointerSize();
     Entries.push_back(llvm::ConstantStruct::get(
         EntryTy, {llvm::ConstantInt::get(CGM.Int32Ty, IsCopy ? 1 : 0),
-                  llvm::ConstantInt::get(CGM.SizeTy, Size)}));
+                  llvm::ConstantInt::get(CGM.SizeTy, Size),
+                  llvm::ConstantInt::get(CGM.SizeTy, Offsets[k])}));
   }
   llvm::ArrayType *ArrTy = llvm::ArrayType::get(EntryTy, Entries.size());
   auto *GV = new llvm::GlobalVariable(
@@ -4593,9 +4767,21 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
           : std::next(KmpTaskTWithPrivatesQTyRD->field_begin(), 1)
                 ->getType()
                 ->castAsRecordDecl();
+  // The packed task-body JIT ABI (-fopenmp-task-jit-type=packed) forwards a
+  // self-contained void(void*,size_t) kernel and enables trivially-copyable
+  // aggregate firstprivates; the default (pointers) forwards the individual-
+  // parameter kernel and allows only scalar firstprivates.
+  const bool TaskJitPacked =
+      CGM.getLangOpts().getOpenMPTaskJitType() == LangOptions::OMPTaskJit_Packed;
   SmallVector<TaskUnpackedCapture, 8> UnpackedCaps;
-  const bool UnpackedForm = collectTaskUnpackedCaptures(
-      CGF, D, Data, Privates, PrivatesRD, NeedsCleanup, UnpackedCaps);
+  const bool UnpackedForm =
+      collectTaskUnpackedCaptures(CGF, D, Data, Privates, PrivatesRD, NeedsCleanup,
+                                  /*AllowAggregate=*/TaskJitPacked, UnpackedCaps);
+  // Natural-aligned packed-buffer layout of the captures (single source of truth
+  // for the packed kernel and the params table's offsets).
+  SmallVector<uint64_t, 8> TaskPackedOffsets;
+  if (UnpackedForm)
+    (void)computeTaskPackedLayout(CGM, UnpackedCaps, TaskPackedOffsets);
 
   // The ahead-of-time routine (kmp_task->routine), for every task.
   llvm::Function *TaskEntry = emitProxyTaskFunction(
@@ -4603,16 +4789,25 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
       KmpTaskTWithPrivatesQTy, KmpTaskTQTy, SharedsPtrTy, TaskFunction,
       TaskPrivatesMap);
 
-  // The void(void**) kernel forwarded to CGIR for JIT/prog-fuse, plus the scatter
-  // for the unpacked form.
+  // The kernel forwarded to CGIR for JIT/prog-fuse, plus the scatter that fills
+  // the recorded per-value &value arg slots (used by prog-fuse for dedup in BOTH
+  // ABIs). Packed ABI: a self-contained void(void*,size_t) body reading captures
+  // from the buffer at fixed offsets. Pointers ABI: the individual-parameter
+  // void(<caps...>) body.
   llvm::Function *TaskIRKernel = nullptr;
   llvm::Function *ScatterFn = nullptr;
   if (UnpackedForm) {
     // (The task's .omp_task_privates_map. is force-inlined into the kernel later,
     // in optimizeTaskClosure, so the reconstructed privates struct scalarizes.)
-    TaskIRKernel = emitTaskUnpackedKernel(
-        CGM, Loc, D.getDirectiveKind(), KmpTaskTWithPrivatesQTy, KmpTaskTQTy,
-        SharedsTy, SharedsPtrTy, TaskFunction, TaskPrivatesMap, UnpackedCaps);
+    if (TaskJitPacked)
+      TaskIRKernel = emitTaskPackedBufferKernel(
+          CGM, Loc, D.getDirectiveKind(), KmpTaskTWithPrivatesQTy, KmpTaskTQTy,
+          SharedsTy, SharedsPtrTy, TaskFunction, TaskPrivatesMap, UnpackedCaps,
+          TaskPackedOffsets);
+    else
+      TaskIRKernel = emitTaskUnpackedKernel(
+          CGM, Loc, D.getDirectiveKind(), KmpTaskTWithPrivatesQTy, KmpTaskTQTy,
+          SharedsTy, SharedsPtrTy, TaskFunction, TaskPrivatesMap, UnpackedCaps);
     ScatterFn = emitTaskUnpackedScatter(CGM, Loc, KmpTaskTWithPrivatesQTy,
                                         KmpTaskTQTy, SharedsTy, SharedsPtrTy,
                                         UnpackedCaps);
@@ -4708,17 +4903,27 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
                                                                      CGF.VoidPtrTy)
                    : llvm::ConstantPointerNull::get(CGF.VoidPtrTy);
 
-  // Per-parameter descriptor table (kind + size), so prog-fuse can deduplicate
-  // references by pointer and copies by value. Only the unpacked form has
-  // individual parameters; the packed form passes null/0.
+  // Per-parameter descriptor table (kind + size + packed-buffer offset), so
+  // prog-fuse can deduplicate references by pointer and copies by value and
+  // pack/reconstruct the buffer. Only the unpacked form has individual
+  // parameters; the packed args[0]==tt form passes null/0.
   llvm::Constant *TaskParamsPtr =
       llvm::ConstantPointerNull::get(CGM.Int8PtrTy);
   llvm::Value *TaskParamsCount = llvm::ConstantInt::get(CGF.SizeTy, 0);
   if (EmbedTaskIR && UnpackedForm) {
-    auto PT = emitTaskParamsTable(CGM, TaskIRKernel, UnpackedCaps);
+    auto PT = emitTaskParamsTable(CGM, TaskIRKernel, UnpackedCaps, TaskPackedOffsets);
     TaskParamsPtr = PT.first;
     TaskParamsCount = PT.second;
   }
+
+  // Task-body JIT ABI requested by -fopenmp-task-jit-type. Forwarded to the
+  // runtime so CGIR's prog-fuse/jit produce the matching program shape; only
+  // meaningful for the unpacked (fusable) form. Mirrors
+  // cgir_command_prog_source_proto_t (0 UNPACKED_PARAMS, 2 PACKED_BUFFER).
+  unsigned TaskJitProtoVal =
+      (UnpackedForm && TaskJitPacked) ? /*PACKED_BUFFER*/ 2u
+                                      : /*UNPACKED_PARAMS*/ 0u;
+  llvm::Value *TaskProto = llvm::ConstantInt::get(CGF.Int32Ty, TaskJitProtoVal);
 
   // Arguments of the func call
   SmallVector<llvm::Value *, 10> AllocArgs = {
@@ -4756,6 +4961,7 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
     AllocArgs.push_back(ScatterArg);
     AllocArgs.push_back(TaskParamsPtr);
     AllocArgs.push_back(TaskParamsCount);
+    AllocArgs.push_back(TaskProto);
     NewTask = CGF.EmitRuntimeCall(
         OMPBuilder.getOrCreateRuntimeFunction(
             CGM.getModule(), OMPRTL___kmpc_omp_target_task_alloc_with_deps),
@@ -4772,6 +4978,7 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
     AllocArgs.push_back(ScatterArg);
     AllocArgs.push_back(TaskParamsPtr);
     AllocArgs.push_back(TaskParamsCount);
+    AllocArgs.push_back(TaskProto);
     NewTask =
         CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
                                 CGM.getModule(), OMPRTL___kmpc_omp_task_alloc_with_deps),
