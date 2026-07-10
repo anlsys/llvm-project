@@ -4138,13 +4138,16 @@ emitTargetKernelSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
 //
 //   FIRSTPRIVATE : privates.<field> holds the copied value.
 //                  scatter: &privates.<field>;   kernel: privates.<field> = param.
-//   SHARED_ADDR  : an array/scalar/struct captured by-ref; shareds.<field> holds
-//                  the base/address the body uses directly (one load).
-//                  scatter: &shareds.<field>;    kernel: shareds.<field> = param.
-//   SHARED_PTR   : a pointer variable captured by-ref; shareds.<field> holds
-//                  &p, and the body loads it twice to reach the pointer value.
-//                  scatter: load(&shareds.<field>) (== &p);
-//                  kernel: ptmp = param; shareds.<field> = &ptmp.
+//   SHARED_ADDR  : an array/scalar/struct captured by-ref; the shareds.<field>
+//                  STORAGE holds the base/address the body uses (one load). The
+//                  field is typically a reference type (float(&)[N]), so the
+//                  storage is read/written raw via EmitLValueForFieldInitialization
+//                  (never auto-dereferenced). Ty is VoidPtr (the carried address).
+//                  scatter: &(field storage);    kernel: (field storage) = param.
+//   SHARED_PTR   : a pointer variable captured by-ref (field T*&); the storage
+//                  holds &p, and the body loads it twice to reach the pointer.
+//                  scatter: load(field storage) (== &p);
+//                  kernel: ptmp = param; (field storage) = &ptmp.
 //
 // For all three, the loop's base ends up equal to the kernel parameter (after
 // SROA), so prog-fuse can deduplicate it across fused bodies and fuse the loops.
@@ -4216,10 +4219,15 @@ static bool collectTaskUnpackedCaptures(CodeGenFunction &CGF,
   }
 
   // Shared parameters: the by-ref captures (CS->captures() minus the
-  // firstprivates). Each maps to a shareds-record field (a pointer). A pointer
-  // variable needs the double-load handling (SHARED_PTR); everything else
-  // (arrays/scalars/structs) is reached with one load (SHARED_ADDR). Reject
-  // `this`/VLA captures and any non-pointer (by-value) capture field.
+  // firstprivates). Each maps to a shareds-record field whose STORAGE holds an
+  // address. OpenMP captures a shared array/scalar/struct by reference, so the
+  // field is a *reference* type (float(&)[N]); a shared pointer variable captured
+  // by reference is a reference-to-pointer (T*&). Both are just a pointer slot in
+  // the record. A pointer variable needs the double-load handling (SHARED_PTR);
+  // everything else is reached with one load (SHARED_ADDR). Reject `this`/VLA
+  // captures and any by-value (non-pointer, non-reference) capture field. The
+  // field storage is always read/written via EmitLValueForFieldInitialization (it
+  // returns the reference storage, not the auto-dereferenced referent).
   const CapturedStmt *CS = D.getCapturedStmt(OMPD_task);
   CodeGenFunction::CGCapturedStmtInfo CapturesInfo(*CS);
   for (const CapturedStmt::Capture &Cap : CS->captures()) {
@@ -4229,12 +4237,19 @@ static bool collectTaskUnpackedCaptures(CodeGenFunction &CGF,
     if (FP.count(VD->getCanonicalDecl()))
       continue; // a firstprivate that is also captured -> handled above
     const FieldDecl *FD = CapturesInfo.lookup(VD);
-    if (!FD || !FD->getType()->isPointerType())
-      return false; // unexpected / by-value capture
-    if (VD->getType()->isPointerType())
+    if (!FD)
+      return false;
+    QualType FTy = FD->getType();
+    if (!FTy->isPointerType() && !FTy->isReferenceType())
+      return false; // by-value (e.g. aggregate) capture field
+    // A pointer variable captured by reference (T*&) needs the double load; any
+    // other shape (array/scalar/struct reference, or a directly-held pointer) is
+    // reached with a single load. The carried value is always just an address.
+    if (FTy->isReferenceType() && VD->getType()->isPointerType())
       Out.push_back({TaskUnpackedCapture::SHARED_PTR, FD, VD->getType()});
     else
-      Out.push_back({TaskUnpackedCapture::SHARED_ADDR, FD, FD->getType()});
+      Out.push_back(
+          {TaskUnpackedCapture::SHARED_ADDR, FD, CGF.getContext().VoidPtrTy});
   }
   return true;
 }
@@ -4321,20 +4336,24 @@ emitTaskUnpackedKernel(CodeGenModule &CGM, SourceLocation Loc,
     case TaskUnpackedCapture::FIRSTPRIVATE:
       CGF.EmitStoreOfScalar(Val, CGF.EmitLValueForField(PrivBase, Cap.Field));
       break;
-    case TaskUnpackedCapture::SHARED_ADDR:
-      CGF.EmitStoreOfScalar(Val, CGF.EmitLValueForField(SLBase, Cap.Field));
+    case TaskUnpackedCapture::SHARED_ADDR: {
+      // The field storage holds the captured address (base pointer). Write it
+      // raw so a reference-typed field (float(&)[N]) is not auto-dereferenced.
+      llvm::Value *S =
+          CGF.EmitLValueForFieldInitialization(SLBase, Cap.Field).getPointer(CGF);
+      CGF.Builder.CreateAlignedStore(Val, S, CGF.getPointerAlign().getAsAlign());
       break;
+    }
     case TaskUnpackedCapture::SHARED_PTR: {
       // ptmp = param; shareds.<field> = &ptmp, so the outlined body's double
       // load (&p -> p) yields the parameter. SROA promotes ptmp once SL is
       // scalarized, leaving the loop base == the parameter.
       Address PTmp = CGF.CreateMemTemp(Cap.Ty, "shared.ptr");
       CGF.EmitStoreOfScalar(Val, CGF.MakeAddrLValue(PTmp, Cap.Ty));
-      CGF.EmitStoreOfScalar(
-          CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
-              PTmp.emitRawPointer(CGF),
-              CGF.ConvertTypeForMem(Cap.Field->getType())),
-          CGF.EmitLValueForField(SLBase, Cap.Field));
+      llvm::Value *S =
+          CGF.EmitLValueForFieldInitialization(SLBase, Cap.Field).getPointer(CGF);
+      CGF.Builder.CreateAlignedStore(PTmp.emitRawPointer(CGF), S,
+                                     CGF.getPointerAlign().getAsAlign());
       break;
     }
     }
@@ -4427,12 +4446,19 @@ static llvm::Function *emitTaskUnpackedScatter(CodeGenModule &CGM, SourceLocatio
       V = CGF.EmitLValueForField(PrivBase, Cap.Field).getPointer(CGF);
       break;
     case TaskUnpackedCapture::SHARED_ADDR:
-      V = CGF.EmitLValueForField(SharedsBase, Cap.Field).getPointer(CGF);
+      // slot = &(field storage); *slot = the captured base pointer. Use the
+      // field-initialization lvalue so a reference-typed field is not auto-
+      // dereferenced (its storage holds the address).
+      V = CGF.EmitLValueForFieldInitialization(SharedsBase, Cap.Field)
+              .getPointer(CGF);
       break;
     case TaskUnpackedCapture::SHARED_PTR:
-      // the field value is &p; its deref is the pointer the kernel param wants
-      V = CGF.EmitLoadOfScalar(CGF.EmitLValueForField(SharedsBase, Cap.Field),
-                               Loc);
+      // the field storage holds &p; load it (raw) so *slot == p for the kernel.
+      V = CGF.Builder.CreateAlignedLoad(
+          CGF.VoidPtrTy,
+          CGF.EmitLValueForFieldInitialization(SharedsBase, Cap.Field)
+              .getPointer(CGF),
+          CGF.getPointerAlign().getAsAlign());
       break;
     }
     llvm::Value *Addr =
@@ -4541,23 +4567,27 @@ emitTaskPackedBufferKernel(CodeGenModule &CGM, SourceLocation Loc,
       break;
     }
     case TaskUnpackedCapture::SHARED_ADDR: {
-      llvm::Value *Ptr = CGF.Builder.CreateAlignedLoad(
-          CGF.ConvertTypeForMem(Cap.Field->getType()), Slot, llvm::Align(1));
-      CGF.EmitStoreOfScalar(Ptr, CGF.EmitLValueForField(SLBase, Cap.Field));
+      // buffer holds the captured base pointer; store it raw into the field
+      // storage (EmitLValueForFieldInitialization avoids auto-dereferencing a
+      // reference-typed field).
+      llvm::Value *Ptr =
+          CGF.Builder.CreateAlignedLoad(CGF.VoidPtrTy, Slot, llvm::Align(1));
+      llvm::Value *S =
+          CGF.EmitLValueForFieldInitialization(SLBase, Cap.Field).getPointer(CGF);
+      CGF.Builder.CreateAlignedStore(Ptr, S, CGF.getPointerAlign().getAsAlign());
       break;
     }
     case TaskUnpackedCapture::SHARED_PTR: {
       // buffer holds the pointer value p; ptmp = p; shareds.<field> = &ptmp so
       // the outlined body's double load (&p -> p) yields p.
-      llvm::Value *P = CGF.Builder.CreateAlignedLoad(
-          CGF.ConvertTypeForMem(Cap.Ty), Slot, llvm::Align(1));
+      llvm::Value *P =
+          CGF.Builder.CreateAlignedLoad(CGF.VoidPtrTy, Slot, llvm::Align(1));
       Address PTmp = CGF.CreateMemTemp(Cap.Ty, "shared.ptr");
       CGF.EmitStoreOfScalar(P, CGF.MakeAddrLValue(PTmp, Cap.Ty));
-      CGF.EmitStoreOfScalar(
-          CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(
-              PTmp.emitRawPointer(CGF),
-              CGF.ConvertTypeForMem(Cap.Field->getType())),
-          CGF.EmitLValueForField(SLBase, Cap.Field));
+      llvm::Value *S =
+          CGF.EmitLValueForFieldInitialization(SLBase, Cap.Field).getPointer(CGF);
+      CGF.Builder.CreateAlignedStore(PTmp.emitRawPointer(CGF), S,
+                                     CGF.getPointerAlign().getAsAlign());
       break;
     }
     }
