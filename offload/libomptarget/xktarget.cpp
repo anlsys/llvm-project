@@ -254,7 +254,14 @@ __xktgt_target_kernel_launch(
     int AccessIdx = 0; // running index for access clause expressions
     for (int32_t i = 0; i < NumClangLaunchArgs ; ++i)
     {
-        assert(KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_TARGET_PARAM);
+        // Non-kernel-parameter map entries (e.g. the pointer `attach` emitted for
+        // map(ptr[lo:hi]) on a pointer variable) are NOT passed to the kernel; their
+        // device-side setup is already done by targetDataBegin above. Skip them so
+        // they don't shift the appended KernelLaunchEnvironment (dyn_ptr) slot, which
+        // would otherwise make __kmpc_target_init dereference a bad pointer. Mirrors
+        // processDataBefore (omptarget.cpp), which skips !TARGET_PARAM args.
+        if (!(KernelArgs->ArgTypes[i] & OMP_TGT_MAPTYPE_TARGET_PARAM))
+            continue;
         void *HstPtrBegin = KernelArgs->ArgPtrs[i];
         void *HstPtrBase = KernelArgs->ArgBasePtrs[i];
         void *TgtPtrBegin;
