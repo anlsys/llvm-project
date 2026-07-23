@@ -523,8 +523,11 @@ int targetDataBegin(ident_t *Loc, DeviceTy &Device, int32_t ArgNum,
   // process each input.
   for (int32_t I = 0; I < ArgNum; ++I) {
     // Ignore private variables and arrays - there is no mapping for them.
+    // Ignore xkomp access-clause entries too: their device pointer is resolved
+    // via xkomp_access_pointer(), not the host-to-device mapping table.
     if ((ArgTypes[I] & OMP_TGT_MAPTYPE_LITERAL) ||
-        (ArgTypes[I] & OMP_TGT_MAPTYPE_PRIVATE))
+        (ArgTypes[I] & OMP_TGT_MAPTYPE_PRIVATE) ||
+        (ArgTypes[I] & OMP_TGT_MAPTYPE_ACCESS))
       continue;
     TIMESCOPE_WITH_DETAILS_AND_IDENT(
         "HostToDev", "Size=" + std::to_string(ArgSizes[I]) + "B", Loc);
@@ -1088,8 +1091,10 @@ int targetDataEnd(ident_t *Loc, DeviceTy &Device, int32_t ArgNum,
   for (int32_t I = ArgNum - 1; I >= 0; --I) {
     // Ignore private variables and arrays - there is no mapping for them.
     // Also, ignore the use_device_ptr directive, it has no effect here.
+    // Ignore xkomp access-clause entries: not tracked in the mapping table.
     if ((ArgTypes[I] & OMP_TGT_MAPTYPE_LITERAL) ||
-        (ArgTypes[I] & OMP_TGT_MAPTYPE_PRIVATE))
+        (ArgTypes[I] & OMP_TGT_MAPTYPE_PRIVATE) ||
+        (ArgTypes[I] & OMP_TGT_MAPTYPE_ACCESS))
       continue;
 
     // Ignore ATTACH entries - they should only be honored on map-entering

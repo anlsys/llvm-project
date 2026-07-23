@@ -224,6 +224,33 @@ __xktgt_target_kernel_launch(
     llvm::SmallVector<ptrdiff_t> TgtOffsets;
 
     int NumClangLaunchArgs = KernelArgs->NumArgs;
+
+    // On-construct map(to/from/tofrom/alloc): allocate device storage and copy
+    // `to` data BEFORE the arg-resolution loop, which reads each mapped pointer
+    // from the mapping table (getTgtPtrBegin). This mirrors the host runtime's
+    // processDataBefore (targetDataBegin) that the loop below was copied from.
+    // Only the synchronous launch is handled here; the async (nowait) path keeps
+    // its prior behavior (data already present via enter data / update).
+    [[maybe_unused]] AsyncInfoTy AsyncInfo(Device);
+    if constexpr (!nowait)
+    {
+        if (NumClangLaunchArgs)
+        {
+            StateInfoTy MapState;
+            if (targetDataBegin(reinterpret_cast<ident_t *>(Loc), Device,
+                    NumClangLaunchArgs, KernelArgs->ArgBasePtrs, KernelArgs->ArgPtrs,
+                    KernelArgs->ArgSizes, KernelArgs->ArgTypes, KernelArgs->ArgNames,
+                    KernelArgs->ArgMappers, AsyncInfo, &MapState,
+                    /*FromMapper=*/false) != OFFLOAD_SUCCESS)
+                LOGGER_FATAL("targetDataBegin failed for target kernel maps");
+            if (!MapState.AttachEntries.empty())
+                processAttachEntries(Device, MapState, AsyncInfo);
+            // The kernel launches on XKRT's stream; make the plugin's H2D visible first.
+            if (AsyncInfo.synchronize() != OFFLOAD_SUCCESS)
+                LOGGER_FATAL("map H2D synchronize failed before target kernel");
+        }
+    }
+
     int AccessIdx = 0; // running index for access clause expressions
     for (int32_t i = 0; i < NumClangLaunchArgs ; ++i)
     {
@@ -407,6 +434,27 @@ __xktgt_target_kernel_launch(
         builder(&command);
         command.prog.args = LaunchParams.Ptrs;   // n_args set by builder
         xkomp->runtime.command_submit(device_unique_id, &command);
+    }
+
+    // On-construct map(from/tofrom): copy `from` data back to the host and release
+    // the device storage AFTER the (synchronous) kernel has completed -- mirrors
+    // processDataAfter (targetDataEnd). The synchronous command_submit above has
+    // already finished the kernel, so the D2H reads final results. The nowait path
+    // relies on prior behavior (no on-construct map data movement).
+    if constexpr (!nowait)
+    {
+        if (NumClangLaunchArgs)
+        {
+            StateInfoTy EndState;
+            if (targetDataEnd(reinterpret_cast<ident_t *>(Loc), Device,
+                    NumClangLaunchArgs, KernelArgs->ArgBasePtrs, KernelArgs->ArgPtrs,
+                    KernelArgs->ArgSizes, KernelArgs->ArgTypes, KernelArgs->ArgNames,
+                    KernelArgs->ArgMappers, AsyncInfo, &EndState,
+                    /*FromMapper=*/false) != OFFLOAD_SUCCESS)
+                LOGGER_FATAL("targetDataEnd failed for target kernel maps");
+            if (AsyncInfo.synchronize() != OFFLOAD_SUCCESS)
+                LOGGER_FATAL("map D2H synchronize failed after target kernel");
+        }
     }
 
     return 0;
