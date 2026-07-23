@@ -12,6 +12,9 @@
 # include <string>
 # include <unordered_map>
 
+# include <dlfcn.h>     // dladdr -- locate this shared object at runtime
+# include <sys/stat.h>  // stat   -- probe the DeviceRTL bitcode path
+
 XKRT_NAMESPACE_USE;
 
 /// External function provided by the xkomp runtime.
@@ -46,6 +49,37 @@ KernelArgsTy * upgradeKernelArgs(
 extern "C" int omp_get_default_device(void);
 extern "C" int omp_get_default_device(void);
 extern "C" xkrt_device_unique_id_t omp_device_id_to_xkomp(int device_id);
+
+/// Locate the OpenMP NVPTX DeviceRTL bitcode (libomptarget-nvptx.bc) shipped with
+/// this toolchain, so CGIR can link it into a JIT-compiled device kernel and
+/// resolve the device-runtime externs (__kmpc_*). It sits next to this
+/// libomptarget shared object, under the device-triple subdirectory:
+///   <libdir>/nvptx64-nvidia-cuda/libomptarget-nvptx.bc
+/// Resolved once via dladdr() and cached. Returns NULL if not found (the caller
+/// then relies on the CGIR_DEVICE_RTL_BC override, or fails at PTX JIT with a
+/// clear "unresolved extern" message).
+/// TODO: generalize the triple/filename per plugin (e.g. AMD DeviceRTL) once
+/// device-side JIT is exercised on non-CUDA targets.
+static const char *
+xktgt_device_runtime_bc(void)
+{
+    static std::string path;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        Dl_info info;
+        if (dladdr((void *) &xktgt_device_runtime_bc, &info) && info.dli_fname)
+        {
+            std::string so = info.dli_fname;
+            const size_t slash = so.find_last_of('/');
+            const std::string libdir = (slash == std::string::npos) ? "." : so.substr(0, slash);
+            const std::string cand = libdir + "/nvptx64-nvidia-cuda/libomptarget-nvptx.bc";
+            struct stat st;
+            if (stat(cand.c_str(), &st) == 0)
+                path = cand;
+        }
+    });
+    return path.empty() ? nullptr : path.c_str();
+}
 
 static void
 __xktgt_target_kernel_launch_free_dup_args(void * args[XKRT_CALLBACK_ARGS_MAX])
@@ -380,6 +414,10 @@ __xktgt_target_kernel_launch(
         cmd->prog.source.content.llvmir.size   = KernelIRSize;
         cmd->prog.source.content.llvmir._owned = false;   // owned by the cache
         cmd->prog.source.content.llvmir.symbol = KernelIR ? GenericKernel.getName() : NULL;
+        // Device runtime bitcode to link when JIT-compiling the (fused) kernel to
+        // PTX, so device-runtime externs (__kmpc_*) resolve. Located next to this
+        // libomptarget install; CGIR links it generically (see emit_device_ptx).
+        cmd->prog.source.content.llvmir.runtime_bc = KernelIR ? xktgt_device_runtime_bc() : NULL;
         cmd->prog.grid.x                      = NumBlocks[0];
         cmd->prog.grid.y                      = NumBlocks[1];
         cmd->prog.grid.z                      = NumBlocks[2];

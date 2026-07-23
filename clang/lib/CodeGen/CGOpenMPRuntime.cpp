@@ -5843,8 +5843,6 @@ void CGOpenMPRuntime::emitTaskCall(CodeGenFunction &CGF, SourceLocation Loc,
   TaskResultTy Result =
       emitTaskInit(CGF, Loc, D, TaskFunction, SharedsTy, Shareds, Data);
   llvm::Value *NewTask = Result.NewTask;
-  llvm::Function *TaskEntry = Result.TaskEntry;
-  llvm::Value *NewTaskNewTaskTTy = Result.NewTaskNewTaskTTy;
   LValue TDBase = Result.TDBase;
   const RecordDecl *KmpTaskTQTyRD = Result.KmpTaskTQTyRD;
   // Process list of dependences.
@@ -5909,53 +5907,28 @@ void CGOpenMPRuntime::emitTaskCall(CodeGenFunction &CGF, SourceLocation Loc,
       Region->emitUntiedSwitch(CGF);
   };
 
-  // For the ElseCodeGen (if0) path, we need to wait on deps and/or accesses
-  // before inlining the task body.
-  llvm::Value *DepWaitTaskArgs[9];
-  bool UseV2Wait = HasAccesses;
-  if (HasDepsOrAccesses) {
-    DepWaitTaskArgs[0] = UpLoc;
-    DepWaitTaskArgs[1] = ThreadID;
-    DepWaitTaskArgs[2] = HasDeps ? NumOfElements : CGF.Builder.getInt32(0);
-    DepWaitTaskArgs[3] = HasDeps ? DependenciesArray.emitRawPointer(CGF)
-                                 : llvm::ConstantPointerNull::get(CGF.VoidPtrTy);
-    DepWaitTaskArgs[4] = CGF.Builder.getInt32(0);
-    DepWaitTaskArgs[5] = llvm::ConstantPointerNull::get(CGF.VoidPtrTy);
-    DepWaitTaskArgs[6] =
-        llvm::ConstantInt::get(CGF.Int32Ty, Data.HasNowaitClause);
-    if (UseV2Wait) {
-      DepWaitTaskArgs[7] = NumOfAccesses;
-      DepWaitTaskArgs[8] = AccessArray.emitRawPointer(CGF);
-    }
-  }
   auto &M = CGM.getModule();
-  auto &&ElseCodeGen = [this, &M, &TaskArgs, &Result, NewTaskNewTaskTTy,
-                        TaskEntry, ThreadID, &DepWaitTaskArgs, UseV2Wait,
-                        HasDepsOrAccesses, Loc](CodeGenFunction &CGF, PrePostActionTy &) {
+  // ElseCodeGen (undeferred `if(0)` task): submit the task through the NORMAL
+  // path -- exactly like the deferred case -- so any thread of the team may run
+  // it (rather than serializing its body on the encountering thread). The submit
+  // is wrapped between __kmpc_omp_task_begin_if0 (which marks the task as
+  // undeferred) and __kmpc_omp_task_complete_if0 (which suspends the encountering
+  // thread, work-stealing, until that specific task has completed). Dependences
+  // ride the normal commit, so no separate taskwait-on-deps is emitted here.
+  auto &&ElseCodeGen = [this, &M, &TaskArgs, &DepTaskArgs,
+                        HasDepsOrAccesses](CodeGenFunction &CGF, PrePostActionTy &) {
     CodeGenFunction::RunCleanupsScope LocalScope(CGF);
-    // Wait on deps and/or accesses before inlining the task body.
-    if (HasDepsOrAccesses) {
-      if (UseV2Wait) {
-        // Use v2 which passes both deps and accesses.
-        CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
-                                M, OMPRTL___kmpc_omp_taskwait_deps_51_v2),
-                            DepWaitTaskArgs);
-      } else {
-        // Only deps, use original taskwait_deps_51 (7 args).
-        llvm::ArrayRef<llvm::Value *> Args7(DepWaitTaskArgs, 7);
-        CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
-                                M, OMPRTL___kmpc_omp_taskwait_deps_51),
-                            Args7);
-      }
-    }
-    // Undeferred (if0) task: invoke the task's ahead-of-time routine directly on
-    // the standard libomp ABI, .omp_task_entry.(gtid, tt).
-    auto &&CodeGen = [TaskEntry, ThreadID, NewTaskNewTaskTTy,
-                      Loc](CodeGenFunction &CGF, PrePostActionTy &Action) {
+    auto &&CodeGen = [this, &M, &TaskArgs, &DepTaskArgs,
+                      HasDepsOrAccesses](CodeGenFunction &CGF, PrePostActionTy &Action) {
       Action.Enter(CGF);
-      llvm::Value *OutlinedFnArgs[] = {ThreadID, NewTaskNewTaskTTy};
-      CGF.CGM.getOpenMPRuntime().emitOutlinedFunctionCall(CGF, Loc, TaskEntry,
-                                                          OutlinedFnArgs);
+      if (HasDepsOrAccesses)
+        CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
+                                M, OMPRTL___kmpc_omp_task_with_deps_v2),
+                            DepTaskArgs);
+      else
+        CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
+                                M, OMPRTL___kmpc_omp_task),
+                            TaskArgs);
     };
 
     // Build void __kmpc_omp_task_begin_if0(ident_t *, kmp_int32 gtid,
