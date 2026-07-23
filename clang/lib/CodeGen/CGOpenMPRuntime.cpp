@@ -4678,7 +4678,8 @@ CGOpenMPRuntime::TaskResultTy
 CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
                               const OMPExecutableDirective &D,
                               llvm::Function *TaskFunction, QualType SharedsTy,
-                              Address Shareds, const OMPTaskDataTy &Data) {
+                              Address Shareds, const OMPTaskDataTy &Data,
+                              const Expr *IfCond) {
   ASTContext &C = CGM.getContext();
   llvm::SmallVector<PrivateDataTy, 4> Privates;
   // Aggregate privates and sort them by the alignment.
@@ -4859,6 +4860,7 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
     DetachableFlag = 0x40,
     FreeAgentFlag = 0x80,
     TransparentFlag = 0x100,
+    UndeferredFlag = 0x200, // XKOMP: `if(0)` undeferred task (kmp_tasking_flags.undeferred)
   };
   unsigned Flags = Data.Tied ? TiedFlag : 0;
   if (NeedsCleanup)
@@ -4883,6 +4885,19 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
           : CGF.Builder.getInt32(Data.Final.getInt() ? FinalFlag : 0);
   // flags
   TaskFlags = CGF.Builder.CreateOr(TaskFlags, CGF.Builder.getInt32(Flags));
+
+  // XKOMP: a task whose `if(cond)` clause evaluates to false is UNDEFERRED.
+  // Convey it as a tasking-flags bit set at task creation; the runtime then
+  // submits the task on the NORMAL path and, seeing this bit, suspends the
+  // encountering thread until the task completes (see the undeferred handling in
+  // __kmpc_omp_task / __kmpc_omp_task_with_deps_v2). This replaces the
+  // begin_if0/complete_if0 + taskwait_deps lowering.
+  if (IfCond) {
+    llvm::Value *UndeferredVal = CGF.Builder.CreateSelect(
+        CGF.EvaluateExprAsBool(IfCond), CGF.Builder.getInt32(0),
+        CGF.Builder.getInt32(UndeferredFlag));
+    TaskFlags = CGF.Builder.CreateOr(TaskFlags, UndeferredVal);
+  }
 
   // shared
   llvm::Value *SharedsSize = CGM.getSize(C.getTypeSizeInChars(SharedsTy));
@@ -5840,8 +5855,9 @@ void CGOpenMPRuntime::emitTaskCall(CodeGenFunction &CGF, SourceLocation Loc,
   if (!CGF.HaveInsertPoint())
     return;
 
+  // Pass IfCond so an `if(cond)`-false task is created UNDEFERRED (flag bit).
   TaskResultTy Result =
-      emitTaskInit(CGF, Loc, D, TaskFunction, SharedsTy, Shareds, Data);
+      emitTaskInit(CGF, Loc, D, TaskFunction, SharedsTy, Shareds, Data, IfCond);
   llvm::Value *NewTask = Result.NewTask;
   LValue TDBase = Result.TDBase;
   const RecordDecl *KmpTaskTQTyRD = Result.KmpTaskTQTyRD;
@@ -5907,51 +5923,12 @@ void CGOpenMPRuntime::emitTaskCall(CodeGenFunction &CGF, SourceLocation Loc,
       Region->emitUntiedSwitch(CGF);
   };
 
-  auto &M = CGM.getModule();
-  // ElseCodeGen (undeferred `if(0)` task): submit the task through the NORMAL
-  // path -- exactly like the deferred case -- so any thread of the team may run
-  // it (rather than serializing its body on the encountering thread). The submit
-  // is wrapped between __kmpc_omp_task_begin_if0 (which marks the task as
-  // undeferred) and __kmpc_omp_task_complete_if0 (which suspends the encountering
-  // thread, work-stealing, until that specific task has completed). Dependences
-  // ride the normal commit, so no separate taskwait-on-deps is emitted here.
-  auto &&ElseCodeGen = [this, &M, &TaskArgs, &DepTaskArgs,
-                        HasDepsOrAccesses](CodeGenFunction &CGF, PrePostActionTy &) {
-    CodeGenFunction::RunCleanupsScope LocalScope(CGF);
-    auto &&CodeGen = [this, &M, &TaskArgs, &DepTaskArgs,
-                      HasDepsOrAccesses](CodeGenFunction &CGF, PrePostActionTy &Action) {
-      Action.Enter(CGF);
-      if (HasDepsOrAccesses)
-        CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
-                                M, OMPRTL___kmpc_omp_task_with_deps_v2),
-                            DepTaskArgs);
-      else
-        CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
-                                M, OMPRTL___kmpc_omp_task),
-                            TaskArgs);
-    };
-
-    // Build void __kmpc_omp_task_begin_if0(ident_t *, kmp_int32 gtid,
-    // kmp_task_t *new_task);
-    // Build void __kmpc_omp_task_complete_if0(ident_t *, kmp_int32 gtid,
-    // kmp_task_t *new_task);
-    RegionCodeGenTy RCG(CodeGen);
-    CommonActionTy Action(OMPBuilder.getOrCreateRuntimeFunction(
-                              M, OMPRTL___kmpc_omp_task_begin_if0),
-                          TaskArgs,
-                          OMPBuilder.getOrCreateRuntimeFunction(
-                              M, OMPRTL___kmpc_omp_task_complete_if0),
-                          TaskArgs);
-    RCG.setAction(Action);
-    RCG(CGF);
-  };
-
-  if (IfCond) {
-    emitIfClause(CGF, IfCond, ThenCodeGen, ElseCodeGen);
-  } else {
-    RegionCodeGenTy ThenRCG(ThenCodeGen);
-    ThenRCG(CGF);
-  }
+  // The task is ALWAYS submitted through the normal path. An `if(cond)` clause
+  // that evaluates false is conveyed as the UndeferredFlag set at creation (see
+  // emitTaskInit); the runtime then suspends the encountering thread until the
+  // task completes. There is therefore no separate inlined/if0 code path here.
+  RegionCodeGenTy ThenRCG(ThenCodeGen);
+  ThenRCG(CGF);
 }
 
 void CGOpenMPRuntime::emitTaskLoopCall(CodeGenFunction &CGF, SourceLocation Loc,

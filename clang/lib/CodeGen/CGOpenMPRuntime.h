@@ -594,10 +594,13 @@ protected:
   /// TaskFunction.
   /// \param Data Additional data for task generation like tiednsee, final
   /// state, list of privates etc.
+  /// \param IfCond The `if` clause condition, if any: when it evaluates to
+  /// false the task is created UNDEFERRED (a tasking-flags bit is set).
   TaskResultTy emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
                             const OMPExecutableDirective &D,
                             llvm::Function *TaskFunction, QualType SharedsTy,
-                            Address Shareds, const OMPTaskDataTy &Data);
+                            Address Shareds, const OMPTaskDataTy &Data,
+                            const Expr *IfCond = nullptr);
 
   /// Emit update for lastprivate conditional data.
   void emitLastprivateConditionalUpdate(CodeGenFunction &CGF, LValue IVLVal,
