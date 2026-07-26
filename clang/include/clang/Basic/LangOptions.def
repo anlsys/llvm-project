@@ -240,7 +240,7 @@ LANGOPT(OpenMPNoThreadState  , 1, 0, NotCompatible, "Assume that no thread in a 
 LANGOPT(OpenMPNoNestedParallelism  , 1, 0, NotCompatible, "Assume that no thread in a parallel region will encounter a parallel region")
 LANGOPT(OpenMPOffloadMandatory  , 1, 0, NotCompatible, "Assert that offloading is mandatory and do not create a host fallback.")
 LANGOPT(OpenMPForceUSM     , 1, 0, NotCompatible, "Enable OpenMP unified shared memory mode via compiler.")
-ENUM_LANGOPT(OpenMPTaskJitType, OpenMPTaskJitTypeKind, 1, OMPTaskJit_Pointers, NotCompatible, "ABI of the args buffer forwarded for OpenMP task JIT/fusion (pointers or packed)")
+ENUM_LANGOPT(OpenMPTaskJitType, OpenMPTaskJitTypeKind, 2, OMPTaskJit_None, NotCompatible, "How task/kernel LLVM-IR is forwarded for OpenMP task JIT/fusion (none forwards nothing; pointers or packed args buffer)")
 LANGOPT(NoGPULib  , 1, 0, NotCompatible, "Indicate a build without the standard GPU libraries.")
 
 LANGOPT(HLSL, 1, 0, NotCompatible, "HLSL")

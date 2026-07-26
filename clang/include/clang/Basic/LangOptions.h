@@ -197,7 +197,11 @@ public:
   /// Selects the ABI of the args buffer forwarded for an OpenMP task body's
   /// JIT/fusion (see CGOpenMPRuntime task codegen).
   enum OpenMPTaskJitTypeKind {
-    /// void(void**): args is an array of pointers (args[k] == &value). Default.
+    /// No task-body/kernel IR is forwarded to the runtime (all JIT-related
+    /// alloc arguments are null/0); the runtime runs the ahead-of-time proxy
+    /// routine only, like stock libomp. Default.
+    OMPTaskJit_None,
+    /// void(void**): args is an array of pointers (args[k] == &value).
     OMPTaskJit_Pointers,
     /// void(void*, size_t): args is a packed byte buffer (leading by-reference
     /// pointers, then inline by-value copies).

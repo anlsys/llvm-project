@@ -4798,14 +4798,19 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
           : std::next(KmpTaskTWithPrivatesQTyRD->field_begin(), 1)
                 ->getType()
                 ->castAsRecordDecl();
-  // The packed task-body JIT ABI (-fopenmp-task-jit-type=packed) forwards a
-  // self-contained void(void*,size_t) kernel and enables trivially-copyable
-  // aggregate firstprivates; the default (pointers) forwards the individual-
-  // parameter kernel and allows only scalar firstprivates.
+  // The default (-fopenmp-task-jit-type=none) forwards NO task-body IR to the
+  // runtime: every JIT-related alloc argument below is null/0 and the runtime
+  // just runs the ahead-of-time proxy routine, like stock libomp. The packed
+  // ABI forwards a self-contained void(void*,size_t) kernel and enables
+  // trivially-copyable aggregate firstprivates; the pointers ABI forwards the
+  // individual-parameter kernel and allows only scalar firstprivates.
+  const bool TaskJitNone =
+      CGM.getLangOpts().getOpenMPTaskJitType() == LangOptions::OMPTaskJit_None;
   const bool TaskJitPacked =
       CGM.getLangOpts().getOpenMPTaskJitType() == LangOptions::OMPTaskJit_Packed;
   SmallVector<TaskUnpackedCapture, 8> UnpackedCaps;
   const bool UnpackedForm =
+      !TaskJitNone &&
       collectTaskUnpackedCaptures(CGF, D, Data, Privates, PrivatesRD, NeedsCleanup,
                                   /*AllowAggregate=*/TaskJitPacked, UnpackedCaps);
   // Natural-aligned packed-buffer layout of the captures (single source of truth
@@ -4842,9 +4847,11 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
     ScatterFn = emitTaskUnpackedScatter(CGM, Loc, KmpTaskTWithPrivatesQTy,
                                         KmpTaskTQTy, SharedsTy, SharedsPtrTy,
                                         UnpackedCaps);
-  } else {
+  } else if (!TaskJitNone) {
     TaskIRKernel = emitPackedTaskKernel(CGM, Loc, TaskEntry);
   }
+  // For -fopenmp-task-jit-type=none, TaskIRKernel/ScatterFn stay null and no
+  // task-body IR is emitted or forwarded (see the null/0 alloc arguments below).
 
   // Build call kmp_task_t * __kmpc_omp_task_alloc(ident_t *, kmp_int32 gtid,
   // kmp_int32 flags, size_t sizeof_kmp_task_t, size_t sizeof_shareds,
@@ -4929,6 +4936,7 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
   // no device IR in the host module, so they pass null/0 here (the device IR is
   // forwarded separately, see emitTargetKernelSourceIR).
   const bool EmbedTaskIR =
+      !TaskJitNone &&
       !isOpenMPTargetExecutionDirective(D.getDirectiveKind()) &&
       !isOpenMPTargetDataManagementDirective(D.getDirectiveKind());
   TaskSourceIR TaskIR =
@@ -7588,7 +7596,10 @@ void CGOpenMPRuntime::emitTargetOutlinedFunctionHelper(
 
   // On device compilation, embed the kernel's LLVM-IR into the device image so
   // the host runtime can forward it to XKOMP (see emitTargetKernelSourceIR).
-  if (CGM.getLangOpts().OpenMPIsTargetDevice && IsOffloadEntry)
+  // Suppressed under -fopenmp-task-jit-type=none: no device IR/PTX is forwarded
+  // (ordinary offload still uses the normally-compiled device image).
+  if (CGM.getLangOpts().OpenMPIsTargetDevice && IsOffloadEntry &&
+      CGM.getLangOpts().getOpenMPTaskJitType() != LangOptions::OMPTaskJit_None)
     emitTargetKernelSourceIR(CGM, OutlinedFn);
 
   for (auto *C : D.getClausesOfKind<OMPXAttributeClause>()) {

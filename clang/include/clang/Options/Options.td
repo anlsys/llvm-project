@@ -4050,11 +4050,12 @@ def fopenmp_EQ : Joined<["-"], "fopenmp=">, Group<f_Group>,
   Visibility<[ClangOption, CC1Option, FlangOption, FC1Option]>;
 def fopenmp_task_jit_type_EQ : Joined<["-"], "fopenmp-task-jit-type=">, Group<f_Group>,
   Visibility<[ClangOption, CC1Option]>,
-  Values<"pointers,packed">, NormalizedValuesScope<"LangOptions">,
-  NormalizedValues<["OMPTaskJit_Pointers", "OMPTaskJit_Packed"]>,
-  HelpText<"ABI of the args buffer forwarded for an OpenMP task body's JIT/fusion: "
-           "'pointers' (a void** array, default) or 'packed' (a single byte buffer).">,
-  MarshallingInfoEnum<LangOpts<"OpenMPTaskJitType">, "OMPTaskJit_Pointers">;
+  Values<"none,pointers,packed">, NormalizedValuesScope<"LangOptions">,
+  NormalizedValues<["OMPTaskJit_None", "OMPTaskJit_Pointers", "OMPTaskJit_Packed"]>,
+  HelpText<"How an OpenMP task body's/kernel's LLVM-IR is forwarded to the runtime "
+           "for JIT/fusion: 'none' (default, forward nothing -- like stock libomp), "
+           "'pointers' (a void** args array) or 'packed' (a single byte buffer).">,
+  MarshallingInfoEnum<LangOpts<"OpenMPTaskJitType">, "OMPTaskJit_None">;
 def fopenmp_use_tls : Flag<["-"], "fopenmp-use-tls">, Group<f_Group>,
   Flags<[NoArgumentUnused, HelpHidden]>;
 def fnoopenmp_use_tls : Flag<["-"], "fnoopenmp-use-tls">, Group<f_Group>,
