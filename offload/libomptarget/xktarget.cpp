@@ -87,6 +87,22 @@ __xktgt_target_kernel_launch_free_dup_args(void * args[XKRT_CALLBACK_ARGS_MAX])
     free(args[0]);
 }
 
+/// Completion callback for a deferred (nowait) reduction kernel: release the
+/// per-launch device KernelLaunchEnvironment and reduction buffer once the
+/// kernel has finished. args[0] = DeviceTy*, args[1] = device KLE, args[2] =
+/// device reduction buffer.
+static void
+__xktgt_target_kernel_launch_free_kle(void * args[XKRT_CALLBACK_ARGS_MAX])
+{
+    DeviceTy * Device             = static_cast<DeviceTy *>(args[0]);
+    void     * DevKLE             = args[1];
+    void     * DevReductionBuffer = args[2];
+    if (DevReductionBuffer)
+        Device->deleteData(DevReductionBuffer, TARGET_ALLOC_DEVICE);
+    if (DevKLE)
+        Device->deleteData(DevKLE, TARGET_ALLOC_DEVICE);
+}
+
 /// Read the device-side LLVM-IR that clang embedded for a target kernel as the
 /// device global "<kernel>__ir" (see emitTargetKernelSourceIR). It is read
 /// host-side from the device image (no device memory access, no JIT), cached per
@@ -347,11 +363,43 @@ __xktgt_target_kernel_launch(
     KernelArgs->NumArgs = TgtArgs.size();
 
     // getKernelLaunchEnvironment
-    // assert(!GenericKernel.KernelEnvironment.Configuration.ReductionDataSize ||
-    //         !GenericKernel.KernelEnvironment.Configuration.ReductionBufferLength);
+    //
+    // Kernels that perform a teams/parallel reduction make the device runtime
+    // dereference KernelLaunchEnvironment->{ReductionBuffer,ReductionCnt,
+    // ReductionIterCnt} (see openmp/device/src/Reduction.cpp). The stock plugin
+    // allocates a device KLE + reduction buffer for such kernels in
+    // GenericKernelTy::getKernelLaunchEnvironment; this XKOMP path bypasses
+    // GenericKernelTy::launch, so we must do the same here. Kernels without a
+    // reduction keep the ~0 "no KLE" sentinel (state::init maps ~0 to nullptr on
+    // the device, and the device never touches the KLE).
+    const auto & RedCfg = GenericKernel.KernelEnvironment.Configuration;
+    const bool NeedsKLE = (RedCfg.ReductionDataSize && RedCfg.ReductionBufferLength);
 
     KernelLaunchEnvironmentTy * KernelLaunchEnvironment = reinterpret_cast<KernelLaunchEnvironmentTy *>(~0);
-    assert(KernelLaunchEnvironment);
+    void * DevKLE             = nullptr;
+    void * DevReductionBuffer = nullptr;
+    if (NeedsKLE)
+    {
+        const int64_t RBSize = (int64_t) RedCfg.ReductionDataSize * (int64_t) RedCfg.ReductionBufferLength;
+        DevReductionBuffer = Device.allocData(RBSize, nullptr, TARGET_ALLOC_DEVICE);
+        DevKLE             = Device.allocData(sizeof(KernelLaunchEnvironmentTy), nullptr, TARGET_ALLOC_DEVICE);
+        if (!DevReductionBuffer || !DevKLE)
+            LOGGER_FATAL("failed to allocate the reduction KLE/buffer for a target kernel");
+
+        // Host image of the KLE: the reduction buffer pointer plus zeroed counters
+        // (the device expects ReductionCnt/ReductionIterCnt == 0 at kernel start).
+        KernelLaunchEnvironmentTy HostKLE;
+        HostKLE.ReductionBuffer = DevReductionBuffer;
+
+        // H2D-copy the KLE and make it visible before the kernel runs on XKRT's
+        // queue (tiny copy, reduction kernels only; mirrors the map H2D + sync).
+        if (Device.submitData(DevKLE, &HostKLE, sizeof(KernelLaunchEnvironmentTy), AsyncInfo) != OFFLOAD_SUCCESS)
+            LOGGER_FATAL("KLE H2D submit failed for a reduction target kernel");
+        if (AsyncInfo.synchronize() != OFFLOAD_SUCCESS)
+            LOGGER_FATAL("KLE H2D synchronize failed for a reduction target kernel");
+
+        KernelLaunchEnvironment = static_cast<KernelLaunchEnvironmentTy *>(DevKLE);
+    }
 
     // prepareArgs
     KernelLaunchParamsTy LaunchParams = GenericKernel.prepareArgs(GenericDevice, ArgPtrs, ArgOffsets, KernelArgs->NumArgs, Args, Ptrs, KernelLaunchEnvironment, KernelArgs->Version);
@@ -464,6 +512,21 @@ __xktgt_target_kernel_launch(
             cb.args[1] = dup_vals;
             command->completion_callback_push(cb);
             # endif
+
+            // Release the per-launch reduction KLE + buffer once the deferred
+            // kernel completes.
+            // TODO(taskgraph): under record/replay this frees after the first
+            // replay and does not re-zero the reduction counters; reductions with
+            // USE_TASKGRAPH need a persistent KLE that is reset before each replay.
+            if (NeedsKLE)
+            {
+                callback_t cb_kle;
+                cb_kle.func    = __xktgt_target_kernel_launch_free_kle;
+                cb_kle.args[0] = &Device;
+                cb_kle.args[1] = DevKLE;
+                cb_kle.args[2] = DevReductionBuffer;
+                command->completion_callback_push(cb_kle);
+            }
         };
 
         xkomp->runtime.task_emit_command(device_unique_id, qtype, ctype, flags, builder_nowait);
@@ -499,6 +562,16 @@ __xktgt_target_kernel_launch(
                 LOGGER_FATAL("targetDataEnd failed for target kernel maps");
             if (AsyncInfo.synchronize() != OFFLOAD_SUCCESS)
                 LOGGER_FATAL("map D2H synchronize failed after target kernel");
+        }
+
+        // The synchronous kernel has completed; release the reduction KLE + buffer.
+        // (The nowait path frees them from the command's completion callback.)
+        if (NeedsKLE)
+        {
+            if (DevReductionBuffer)
+                Device.deleteData(DevReductionBuffer, TARGET_ALLOC_DEVICE);
+            if (DevKLE)
+                Device.deleteData(DevKLE, TARGET_ALLOC_DEVICE);
         }
     }
 
