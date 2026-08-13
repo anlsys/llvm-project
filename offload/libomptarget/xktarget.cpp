@@ -103,6 +103,75 @@ __xktgt_target_kernel_launch_free_kle(void * args[XKRT_CALLBACK_ARGS_MAX])
         Device->deleteData(DevKLE, TARGET_ALLOC_DEVICE);
 }
 
+/////////////////////////////////////////////////////////////////////////////
+// Device memory allocation, redirected to the (fast) XKRT allocator.
+//
+// DeviceTy::allocData / deleteData call the two hooks below. XKRT's device
+// allocator returns an `area_chunk_t *` (the raw device pointer is chunk->ptr),
+// and frees by chunk -- but LLVM's dataDelete only provides the raw pointer, so
+// we keep a raw-ptr -> chunk side table. It also disambiguates XKRT- vs
+// plugin-allocated pointers at free time (only device-kind allocations on a
+// ready XKRT device are redirected; everything else falls back to the plugin,
+// which is safe since XKRT and the plugin share the CUDA primary context).
+/////////////////////////////////////////////////////////////////////////////
+
+static std::mutex                                 g_xktgt_dev_alloc_mutex;
+static std::unordered_map<void *, area_chunk_t *> g_xktgt_dev_chunks;
+
+bool
+__xktgt_data_alloc(int32_t DeviceId, int64_t Size, int32_t Kind, void ** OutPtr)
+{
+    // Device memory only; host-pinned and unified allocations stay on the plugin.
+    if (Kind != TARGET_ALLOC_DEVICE && Kind != TARGET_ALLOC_DEFAULT)
+        return false;
+
+    xkomp_t * xkomp = xkomp_get();
+    if (!xkomp)                                        // XKRT not up yet (early init)
+        return false;
+
+    const device_unique_id_t dev = omp_device_id_to_xkomp(DeviceId);
+    if (dev == XKRT_HOST_DEVICE_UNIQUE_ID)             // not an XKRT-managed device
+        return false;
+    if (xkomp->runtime.device_get(dev) == NULL)        // device not initialized yet
+        return false;
+
+    // From here XKRT owns this allocation: report an out-of-memory as a null
+    // pointer (as a real allocator would) rather than silently falling back.
+    area_chunk_t * chunk = xkomp->runtime.memory_device_allocate(dev, (size_t) Size);
+    if (chunk == NULL)
+    {
+        *OutPtr = NULL;
+        return true;
+    }
+
+    void * ptr = reinterpret_cast<void *>(chunk->ptr);
+    {
+        std::lock_guard<std::mutex> lock(g_xktgt_dev_alloc_mutex);
+        g_xktgt_dev_chunks[ptr] = chunk;
+    }
+    *OutPtr = ptr;
+    return true;
+}
+
+bool
+__xktgt_data_delete(int32_t DeviceId, void * Ptr, int32_t Kind)
+{
+    (void) Kind;
+
+    area_chunk_t * chunk = NULL;
+    {
+        std::lock_guard<std::mutex> lock(g_xktgt_dev_alloc_mutex);
+        auto it = g_xktgt_dev_chunks.find(Ptr);
+        if (it == g_xktgt_dev_chunks.end())
+            return false;                              // not XKRT-allocated: plugin frees it
+        chunk = it->second;
+        g_xktgt_dev_chunks.erase(it);
+    }
+
+    xkomp_get()->runtime.memory_device_deallocate(omp_device_id_to_xkomp(DeviceId), chunk);
+    return true;
+}
+
 /// Read the device-side LLVM-IR that clang embedded for a target kernel as the
 /// device global "<kernel>__ir" (see emitTargetKernelSourceIR). It is read
 /// host-side from the device image (no device memory access, no JIT), cached per

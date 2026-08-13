@@ -21,6 +21,7 @@
 #include "omptarget.h"
 #include "private.h"
 #include "rtl.h"
+#include "xktarget.h"
 
 #include "Shared/EnvironmentVar.h"
 #include "llvm/Support/Error.h"
@@ -247,6 +248,11 @@ void *DeviceTy::allocData(int64_t Size, void *HstPtr, int32_t Kind) {
                     DeviceID, HstPtr, &TargetPtr, Size,
                     /*CodePtr=*/OMPT_GET_RETURN_ADDRESS);)
 
+  // Redirect device-memory allocation to the (fast) XKRT allocator when it can
+  // handle it; otherwise fall back to the plugin allocator.
+  if (__xktgt_data_alloc(DeviceID, Size, Kind, &TargetPtr))
+    return TargetPtr;
+
   TargetPtr = RTL->data_alloc(RTLDeviceID, Size, HstPtr, Kind);
   return TargetPtr;
 }
@@ -257,6 +263,11 @@ int32_t DeviceTy::deleteData(void *TgtAllocBegin, int32_t Kind) {
                     RegionInterface.getCallbacks<ompt_target_data_delete>(),
                     DeviceID, TgtAllocBegin,
                     /*CodePtr=*/OMPT_GET_RETURN_ADDRESS);)
+
+  // Free XKRT-allocated device memory through XKRT; fall back to the plugin for
+  // anything not tracked by the XKRT allocator.
+  if (__xktgt_data_delete(DeviceID, TgtAllocBegin, Kind))
+    return OFFLOAD_SUCCESS;
 
   return RTL->data_delete(RTLDeviceID, TgtAllocBegin, Kind);
 }
