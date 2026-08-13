@@ -583,11 +583,17 @@ __xktgt_target_kernel_launch(
             # endif
 
             // Release the per-launch reduction KLE + buffer once the deferred
-            // kernel completes.
-            // TODO(taskgraph): under record/replay this frees after the first
-            // replay and does not re-zero the reduction counters; reductions with
-            // USE_TASKGRAPH need a persistent KLE that is reset before each replay.
-            if (NeedsKLE)
+            // kernel completes -- but only when NOT recording a taskgraph.
+            // Under record/replay the kernel body runs once (at record time) and
+            // the recorded command replays with the KLE pointer baked in, so the
+            // KLE + buffer must persist for the graph's lifetime. Freeing them on
+            // completion of the record execution would leave replays pointing at
+            // freed device memory. The device runtime self-resets the reduction
+            // counters each teams-reduction (Reduction.cpp), so no per-replay
+            // reset is needed; the buffer is simply reused. During recording we
+            // therefore leak the KLE + buffer (bounded: one per distinct reduction
+            // kernel per recorded graph), matching the dup_ptrs/dup_vals leak above.
+            if (NeedsKLE && !xkomp->runtime.task_dependency_graph_is_recording())
             {
                 callback_t cb_kle;
                 cb_kle.func    = __xktgt_target_kernel_launch_free_kle;
