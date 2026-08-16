@@ -579,7 +579,6 @@ public:
   /// The image that contains this kernel.
   DeviceImageTy *ImagePtr = nullptr;
 
-protected:
   /// The preferred number of threads to run the kernel.
   uint32_t PreferredNumThreads;
 

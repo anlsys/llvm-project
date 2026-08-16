@@ -115,8 +115,9 @@ __xktgt_target_kernel_launch_free_kle(void * args[XKRT_CALLBACK_ARGS_MAX])
 // which is safe since XKRT and the plugin share the CUDA primary context).
 /////////////////////////////////////////////////////////////////////////////
 
-static std::mutex                                 g_xktgt_dev_alloc_mutex;
+[[clang::no_destroy]]
 static std::unordered_map<void *, area_chunk_t *> g_xktgt_dev_chunks;
+static std::mutex                                 g_xktgt_dev_alloc_mutex;
 
 bool
 __xktgt_data_alloc(int32_t DeviceId, int64_t Size, int32_t Kind, void ** OutPtr)
