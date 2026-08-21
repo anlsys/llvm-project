@@ -594,7 +594,7 @@ __xktgt_target_kernel_launch(
             // reset is needed; the buffer is simply reused. During recording we
             // therefore leak the KLE + buffer (bounded: one per distinct reduction
             // kernel per recorded graph), matching the dup_ptrs/dup_vals leak above.
-            if (NeedsKLE && !xkomp->runtime.task_dependency_graph_is_recording())
+            if (NeedsKLE && !xkomp->runtime.task_is_being_recorded())
             {
                 callback_t cb_kle;
                 cb_kle.func    = __xktgt_target_kernel_launch_free_kle;
