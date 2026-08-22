@@ -4025,8 +4025,10 @@ serializeClosureToBitcode(CodeGenModule &CGM, llvm::Function *Fn,
 static llvm::StructType *getTaskJitDescTy(CodeGenModule &CGM) {
   llvm::Type *P = CGM.Int8PtrTy;
   llvm::Type *I64 = CGM.Int64Ty;
+  // Trailing P is the entry-function name (i8*), so the JIT resolves the closure
+  // entry by name instead of guessing (host tasks otherwise carry no symbol).
   return llvm::StructType::get(CGM.getLLVMContext(),
-                               {P, I64, P, I64, P, I64, I64});
+                               {P, I64, P, I64, P, I64, I64, P});
 }
 
 /// Emit the externalized-global resolution table { i8* name; i8* addr; }[] for a
@@ -4170,6 +4172,12 @@ void CodeGenModule::finalizeForwardedTaskIR() {
         llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(IRGV, Int8PtrTy);
     llvm::Constant *ParamsPtr =
         R.Params ? R.Params : llvm::ConstantPointerNull::get(Int8PtrTy);
+    // The closure externalizes R.Entry keeping its name, so the JIT finds the
+    // entry by this exact name (no fragile "first external definition" guess).
+    llvm::Constant *EntryNameC =
+        llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(
+            GetAddrOfConstantCString(R.Entry->getName().str()).getPointer(),
+            Int8PtrTy);
     llvm::Constant *Init = llvm::ConstantStruct::get(
         DescTy, {IRPtr,
                  llvm::ConstantInt::get(Int64Ty, Ser[I].Bitcode.size()),
@@ -4177,7 +4185,8 @@ void CodeGenModule::finalizeForwardedTaskIR() {
                  llvm::ConstantInt::get(Int64Ty, Ext.second),
                  ParamsPtr,
                  llvm::ConstantInt::get(Int64Ty, R.ParamsCount),
-                 llvm::ConstantInt::get(Int64Ty, (uint64_t)R.Proto)});
+                 llvm::ConstantInt::get(Int64Ty, (uint64_t)R.Proto),
+                 EntryNameC});
     assert(R.Descriptor && "host forwarded-IR record without a descriptor");
     R.Descriptor->setInitializer(Init);
   }
