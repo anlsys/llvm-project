@@ -6,14 +6,20 @@
 # include "Shared/APITypes.h"
 # include "xktarget.h"
 
+# include "llvm/ADT/SmallString.h"     // SmallString -- real_path output buffer
 # include "llvm/Support/Error.h"
+# include "llvm/Support/FileSystem.h"  // real_path -- resolve ptxas symlink
+# include "llvm/Support/Path.h"        // parent_path / filename
+# include "llvm/Support/Program.h"     // findProgramByName -- ptxas on PATH
 
+# include <cstdlib>     // getenv
 # include <mutex>
 # include <string>
 # include <unordered_map>
+# include <vector>
 
 # include <dlfcn.h>     // dladdr -- locate this shared object at runtime
-# include <sys/stat.h>  // stat   -- probe the DeviceRTL bitcode path
+# include <sys/stat.h>  // stat   -- probe bitcode paths
 
 XKRT_NAMESPACE_USE;
 
@@ -55,9 +61,8 @@ extern "C" xkrt_device_unique_id_t omp_device_id_to_xkomp(int device_id);
 /// resolve the device-runtime externs (__kmpc_*). It sits next to this
 /// libomptarget shared object, under the device-triple subdirectory:
 ///   <libdir>/nvptx64-nvidia-cuda/libomptarget-nvptx.bc
-/// Resolved once via dladdr() and cached. Returns NULL if not found (the caller
-/// then relies on the CGIR_DEVICE_RTL_BC override, or fails at PTX JIT with a
-/// clear "unresolved extern" message).
+/// Resolved once via dladdr() and cached. Returns NULL if not found (the kernel
+/// then fails at PTX JIT with a clear "unresolved extern" message).
 /// TODO: generalize the triple/filename per plugin (e.g. AMD DeviceRTL) once
 /// device-side JIT is exercised on non-CUDA targets.
 static const char *
@@ -79,6 +84,70 @@ xktgt_device_runtime_bc(void)
         }
     });
     return path.empty() ? nullptr : path.c_str();
+}
+
+/// Locate NVIDIA's libdevice bitcode (libdevice.10.bc), which defines the device
+/// math externs (__nv_cbrt, __nv_pow, ...) the DeviceRTL does not provide, so CGIR
+/// can link it into a JIT-compiled device kernel. Mirrors clang's CUDA detection:
+/// an explicit override, then CUDA_HOME/CUDA_PATH, then `ptxas` on PATH (its bin/'s
+/// parent), then the standard install dir. Resolved once and cached; NULL if not
+/// found (the kernel then fails at PTX JIT with a clear "unresolved extern").
+static const char *
+xktgt_device_libdevice_bc(void)
+{
+    static std::string path;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        const std::string leaf = "/nvvm/libdevice/libdevice.10.bc";
+        auto probe = [&] (const std::string & root) -> bool {
+            if (root.empty())
+                return false;
+            const std::string cand = root + leaf;
+            struct stat st;
+            if (stat(cand.c_str(), &st) == 0) { path = cand; return true; }
+            return false;
+        };
+
+        // 1. explicit override (full path to the .bc)
+        if (const char * bc = getenv("CGIR_DEVICE_LIBDEVICE_BC"); bc && bc[0])
+        {
+            struct stat st;
+            if (stat(bc, &st) == 0) { path = bc; return ; }
+        }
+        // 2. CUDA toolkit root via environment
+        if (const char * h = getenv("CUDA_HOME"); h && probe(h)) return ;
+        if (const char * h = getenv("CUDA_PATH"); h && probe(h)) return ;
+        // 3. ptxas on PATH -> parent of its bin/ directory
+        if (llvm::ErrorOr<std::string> ptxas = llvm::sys::findProgramByName("ptxas"))
+        {
+            llvm::SmallString<256> real;
+            llvm::sys::fs::real_path(*ptxas, real);
+            const llvm::StringRef bin = llvm::sys::path::parent_path(real);
+            if (llvm::sys::path::filename(bin) == "bin" &&
+                probe(std::string(llvm::sys::path::parent_path(bin))))
+                return ;
+        }
+        // 4. standard install location
+        probe("/usr/local/cuda");
+    });
+    return path.empty() ? nullptr : path.c_str();
+}
+
+/// The device bitcode libraries CGIR links into a JIT-compiled device kernel, in
+/// link order: the OpenMP DeviceRTL (resolves __kmpc_*) then NVIDIA libdevice
+/// (resolves __nv_* math). Built once from the located paths (NULLs skipped); the
+/// storage is process-lifetime, so the command's source references it non-owning.
+static const char * const *
+xktgt_device_libs(size_t & count)
+{
+    static std::vector<const char *> libs;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        if (const char * rtl = xktgt_device_runtime_bc())  libs.push_back(rtl);
+        if (const char * ld  = xktgt_device_libdevice_bc()) libs.push_back(ld);
+    });
+    count = libs.size();
+    return libs.empty() ? nullptr : libs.data();
 }
 
 static void
@@ -532,10 +601,13 @@ __xktgt_target_kernel_launch(
         cmd->prog.source.content.llvmir.size   = KernelIRSize;
         cmd->prog.source.content.llvmir._owned = false;   // owned by the cache
         cmd->prog.source.content.llvmir.symbol = KernelIR ? GenericKernel.getName() : NULL;
-        // Device runtime bitcode to link when JIT-compiling the (fused) kernel to
-        // PTX, so device-runtime externs (__kmpc_*) resolve. Located next to this
-        // libomptarget install; CGIR links it generically (see emit_device_ptx).
-        cmd->prog.source.content.llvmir.runtime_bc = KernelIR ? xktgt_device_runtime_bc() : NULL;
+        // Device bitcode CGIR links when JIT-compiling the (fused) kernel to PTX
+        // (DeviceRTL + libdevice), so its __kmpc_*/__nv_* externs resolve. Located
+        // from the toolchain; CGIR links them generically (see emit_device_ptx).
+        size_t nlibs = 0;
+        const char * const * libs = KernelIR ? xktgt_device_libs(nlibs) : NULL;
+        cmd->prog.source.content.llvmir.device_libs       = libs;
+        cmd->prog.source.content.llvmir.device_libs_count = libs ? nlibs : 0;
         cmd->prog.grid.x                      = NumBlocks[0];
         cmd->prog.grid.y                      = NumBlocks[1];
         cmd->prog.grid.z                      = NumBlocks[2];
