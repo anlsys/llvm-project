@@ -356,11 +356,8 @@ __OMP_RTL(__kmpc_omp_task_alloc, false, /* kmp_task_t */ VoidPtr, IdentPtr,
 __OMP_RTL(__kmpc_omp_task_alloc_with_deps, false, /* kmp_task_t */ VoidPtr, IdentPtr,
           Int32, Int32, SizeTy, SizeTy, TaskRoutineEntryPtr, Int32,
           /* nacs */ Int32,
-          /* llvm-ir */ VoidPtr, /* llvm-ir size */ SizeTy,
-          /* llvm-ir externs */ VoidPtr, /* llvm-ir externs count */ SizeTy,
-          /* leaf n_args */ SizeTy, /* leaf scatter */ VoidPtr,
-          /* params */ VoidPtr, /* params count */ SizeTy,
-          /* jit proto */ Int32)
+          /* jit source descriptor (kmp_task_jit_desc_t*) */ VoidPtr,
+          /* leaf n_args */ SizeTy, /* leaf scatter */ VoidPtr)
 __OMP_RTL(__kmpc_omp_task, false, Int32, IdentPtr, Int32,
           /* kmp_task_t */ VoidPtr)
 __OMP_RTL(__kmpc_end_taskgroup, false, Void, IdentPtr, Int32)
@@ -389,11 +386,8 @@ __OMP_RTL(__kmpc_omp_target_task_alloc, false, /* kmp_task_t */ VoidPtr,
 __OMP_RTL(__kmpc_omp_target_task_alloc_with_deps, false, /* kmp_task_t */ VoidPtr,
           IdentPtr, Int32, Int32, SizeTy, SizeTy, TaskRoutineEntryPtr, Int64, Int32,
           /* nacs */ Int32,
-          /* llvm-ir */ VoidPtr, /* llvm-ir size */ SizeTy,
-          /* llvm-ir externs */ VoidPtr, /* llvm-ir externs count */ SizeTy,
-          /* leaf n_args */ SizeTy, /* leaf scatter */ VoidPtr,
-          /* params */ VoidPtr, /* params count */ SizeTy,
-          /* jit proto */ Int32)
+          /* jit source descriptor (kmp_task_jit_desc_t*) */ VoidPtr,
+          /* leaf n_args */ SizeTy, /* leaf scatter */ VoidPtr)
 __OMP_RTL(__kmpc_taskred_modifier_init, false, /* kmp_taskgroup */ VoidPtr,
           IdentPtr, /* Int */ Int32, /* Int */ Int32, /* Int */ Int32, VoidPtr)
 __OMP_RTL(__kmpc_taskred_init, false, /* kmp_taskgroup */ VoidPtr,
@@ -944,15 +938,9 @@ __OMP_RTL_ATTRS(__kmpc_omp_task_alloc, DefaultAttrs, ReturnPtrAttrs,
 __OMP_RTL_ATTRS(__kmpc_omp_task_alloc_with_deps, DefaultAttrs, ReturnPtrAttrs,
                 ParamAttrs(ReadOnlyPtrAttrs, SExt, SExt, SizeTyExt, SizeTyExt,
                            ReadOnlyPtrAttrs, SExt, SExt,
-                           /* llvm-ir (captured by the runtime) */ AttributeSet(),
-                           /* llvm-ir size */ SizeTyExt,
-                           /* llvm-ir externs (captured by the runtime) */ AttributeSet(),
-                           /* llvm-ir externs count */ SizeTyExt,
+                           /* jit source descriptor (captured by the runtime) */ AttributeSet(),
                            /* leaf n_args */ SizeTyExt,
-                           /* leaf scatter (captured by the runtime) */ AttributeSet(),
-                           /* params (captured by the runtime) */ AttributeSet(),
-                           /* params count */ SizeTyExt,
-                           /* jit proto */ SExt))
+                           /* leaf scatter (captured by the runtime) */ AttributeSet()))
 __OMP_RTL_ATTRS(__kmpc_omp_task, DefaultAttrs, SExt,
                 ParamAttrs(ReadOnlyPtrAttrs, SExt, AttributeSet()))
 __OMP_RTL_ATTRS(__kmpc_end_taskgroup, BarrierAttrs, AttributeSet(),
@@ -979,15 +967,9 @@ __OMP_RTL_ATTRS(__kmpc_omp_target_task_alloc, DefaultAttrs, ReturnPtrAttrs,
 __OMP_RTL_ATTRS(__kmpc_omp_target_task_alloc_with_deps, DefaultAttrs, ReturnPtrAttrs,
                 ParamAttrs(ReadOnlyPtrAttrs, SExt, SExt, SizeTyExt, SizeTyExt,
                            ReadOnlyPtrAttrs, AttributeSet(), SExt, SExt,
-                           /* llvm-ir (captured by the runtime) */ AttributeSet(),
-                           /* llvm-ir size */ SizeTyExt,
-                           /* llvm-ir externs (captured by the runtime) */ AttributeSet(),
-                           /* llvm-ir externs count */ SizeTyExt,
+                           /* jit source descriptor (captured by the runtime) */ AttributeSet(),
                            /* leaf n_args */ SizeTyExt,
-                           /* leaf scatter (captured by the runtime) */ AttributeSet(),
-                           /* params (captured by the runtime) */ AttributeSet(),
-                           /* params count */ SizeTyExt,
-                           /* jit proto */ SExt))
+                           /* leaf scatter (captured by the runtime) */ AttributeSet()))
 __OMP_RTL_ATTRS(__kmpc_taskred_modifier_init, DefaultAttrs, AttributeSet(),
                 ParamAttrs(ReadOnlyPtrAttrs, SExt, SExt, SExt))
 __OMP_RTL_ATTRS(__kmpc_taskred_init, DefaultAttrs, AttributeSet(),

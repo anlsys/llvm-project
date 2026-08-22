@@ -4019,115 +4019,168 @@ serializeClosureToBitcode(CodeGenModule &CGM, llvm::Function *Fn,
   return !Out.empty();
 }
 
-/// {bitcode, size, externs-table, externs-count} forwarded to the runtime for a
-/// task body: the serialized IR closure plus the resolution table for the
-/// mutable globals the body references (see emitTaskSourceIR).
-struct TaskSourceIR {
-  llvm::Constant *IRPtr;        // i8* to the embedded bitcode (or null)
-  llvm::Value    *IRSize;       // size_t bytes
-  llvm::Constant *ExternsPtr;   // {i8* name, i8* addr}[] table (or null)
-  llvm::Value    *ExternsCount; // size_t number of entries
-};
-
-/// Serialize the outlined task body \p Fn to LLVM bitcode, embed it as a private
-/// constant global, and (for the mutable globals the body references) emit a
-/// resolution table mapping each externalized global's name to its real runtime
-/// address. Returns null/0 fields when \p Fn is null.
-static TaskSourceIR
-emitTaskSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
-  llvm::Module &M = CGM.getModule();
-  llvm::LLVMContext &Ctx = M.getContext();
-  llvm::Constant *NullPtr = llvm::ConstantPointerNull::get(CGM.Int8PtrTy);
-  llvm::Value *Zero = llvm::ConstantInt::get(CGM.SizeTy, 0);
-
-  if (!Fn)
-    return {NullPtr, Zero, NullPtr, Zero};
-
-  llvm::SmallString<4096> Buffer;
-  llvm::SmallVector<llvm::GlobalVariable *, 8> Externs;
-  // Optimize (scalarize) the closure so an unpacked task body is recorded in a
-  // directly-fusable form; see optimizeTaskClosure.
-  if (!serializeClosureToBitcode(CGM, Fn, Buffer, &Externs, /*OptimizeClone=*/true))
-    return {NullPtr, Zero, NullPtr, Zero};
-
-  // Embed as a private constant byte array global.
-  llvm::Constant *Init = llvm::ConstantDataArray::get(
-      Ctx, llvm::ArrayRef<uint8_t>(
-               reinterpret_cast<const uint8_t *>(Buffer.data()),
-               Buffer.size()));
-  auto *GV = new llvm::GlobalVariable(
-      M, Init->getType(), /*isConstant=*/true,
-      llvm::GlobalValue::PrivateLinkage, Init,
-      llvm::Twine(".omp_task_ir.") + Fn->getName());
-  GV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-
-  llvm::Value *Size = llvm::ConstantInt::get(CGM.SizeTy, Buffer.size());
-
-  // Build the externalized-global resolution table:
-  //   struct { i8* name; i8* addr; } __omp_task_externs.<Fn>[N]
-  // `addr` is a reference to the original (module-defined) global, so at load
-  // time it resolves to the real runtime address. The runtime forwards this to
-  // CGIR's jit, which installs each as an absolute symbol.
-  llvm::Constant *ExternsPtr = NullPtr;
-  llvm::Value *ExternsCount = Zero;
-  if (!Externs.empty()) {
-    llvm::StructType *EntryTy =
-        llvm::StructType::get(CGM.Int8PtrTy, CGM.Int8PtrTy);
-    llvm::SmallVector<llvm::Constant *, 8> Entries;
-    Entries.reserve(Externs.size());
-    for (llvm::GlobalVariable *G : Externs) {
-      llvm::Constant *Name =
-          CGM.GetAddrOfConstantCString(G->getName().str()).getPointer();
-      llvm::Constant *NameC =
-          llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(Name,
-                                                               CGM.Int8PtrTy);
-      llvm::Constant *AddrC =
-          llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(G, CGM.Int8PtrTy);
-      Entries.push_back(llvm::ConstantStruct::get(EntryTy, {NameC, AddrC}));
-    }
-    llvm::ArrayType *ArrTy = llvm::ArrayType::get(EntryTy, Entries.size());
-    llvm::Constant *ArrInit = llvm::ConstantArray::get(ArrTy, Entries);
-    auto *ExternsGV = new llvm::GlobalVariable(
-        M, ArrTy, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
-        ArrInit, llvm::Twine(".omp_task_externs.") + Fn->getName());
-    ExternsGV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-    ExternsPtr = ExternsGV;
-    ExternsCount = llvm::ConstantInt::get(CGM.SizeTy, Externs.size());
-  }
-
-  return {GV, Size, ExternsPtr, ExternsCount};
+/// LLVM struct type matching the runtime's kmp_task_jit_desc_t: all 8-byte
+/// fields { i8* ir; i64 ir_size; i8* externs; i64 externs_count; i8* params;
+/// i64 params_count; i64 proto } (no padding).
+static llvm::StructType *getTaskJitDescTy(CodeGenModule &CGM) {
+  llvm::Type *P = CGM.Int8PtrTy;
+  llvm::Type *I64 = CGM.Int64Ty;
+  return llvm::StructType::get(CGM.getLLVMContext(),
+                               {P, I64, P, I64, P, I64, I64});
 }
 
-/// On device compilation, serialize the target-region kernel \p Fn's IR closure
-/// and embed it as an externally-visible device global named "<Fn>__ir", kept
-/// alive via llvm.used. The host runtime reads it back from the device image
-/// (offload GlobalHandler::readGlobalFromImage) and forwards it to XKOMP so the
-/// kernel can later be JIT-compiled/fused. No-op if \p Fn is null.
+/// Emit the externalized-global resolution table { i8* name; i8* addr; }[] for a
+/// closure's mutable globals so the JIT binds them to the real objects.
+/// Returns {i8* table (or null), count}.
+static std::pair<llvm::Constant *, uint64_t>
+buildExternsTable(CodeGenModule &CGM, llvm::StringRef Name,
+                  ArrayRef<llvm::GlobalVariable *> Externs) {
+  if (Externs.empty())
+    return {llvm::ConstantPointerNull::get(CGM.Int8PtrTy), 0};
+  llvm::Module &M = CGM.getModule();
+  llvm::StructType *EntryTy = llvm::StructType::get(CGM.Int8PtrTy, CGM.Int8PtrTy);
+  llvm::SmallVector<llvm::Constant *, 8> Entries;
+  Entries.reserve(Externs.size());
+  for (llvm::GlobalVariable *G : Externs) {
+    llvm::Constant *NameC = llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(
+        CGM.GetAddrOfConstantCString(G->getName().str()).getPointer(),
+        CGM.Int8PtrTy);
+    llvm::Constant *AddrC =
+        llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(G, CGM.Int8PtrTy);
+    Entries.push_back(llvm::ConstantStruct::get(EntryTy, {NameC, AddrC}));
+  }
+  llvm::ArrayType *ArrTy = llvm::ArrayType::get(EntryTy, Entries.size());
+  auto *GV = new llvm::GlobalVariable(
+      M, ArrTy, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
+      llvm::ConstantArray::get(ArrTy, Entries),
+      llvm::Twine(".omp_task_externs.") + Name);
+  GV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+  return {GV, Entries.size()};
+}
+
+/// Emit a placeholder kmp_task_jit_desc_t global for task body \p Fn, record it
+/// for end-of-TU serialization (finalizeForwardedTaskIR), and return its stable
+/// address for the alloc call. Null i8* when \p Fn is null (no IR forwarded).
+static llvm::Constant *
+emitTaskJitDescriptor(CodeGenModule &CGM, llvm::Function *Fn, bool Scalarize,
+                      llvm::Constant *Params, uint64_t ParamsCount,
+                      int64_t Proto) {
+  if (!Fn)
+    return llvm::ConstantPointerNull::get(CGM.Int8PtrTy);
+  llvm::StructType *DescTy = getTaskJitDescTy(CGM);
+  auto *Desc = new llvm::GlobalVariable(
+      CGM.getModule(), DescTy, /*isConstant=*/true,
+      llvm::GlobalValue::PrivateLinkage, llvm::ConstantAggregateZero::get(DescTy),
+      llvm::Twine(".omp_task_jit_desc.") + Fn->getName());
+  Desc->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+
+  CodeGenModule::ForwardedTaskIR R;
+  R.Entry = Fn;
+  R.IsDevice = false;
+  R.Scalarize = Scalarize;
+  R.Descriptor = Desc;
+  R.Params = Params;
+  R.ParamsCount = ParamsCount;
+  R.Proto = Proto;
+  CGM.addForwardedTaskIR(R);
+  return Desc;
+}
+
+/// On device compilation, record target-region kernel \p Fn for end-of-TU
+/// serialization into an external "<Fn>__ir" global the host runtime reads back
+/// from the device image. No-op if \p Fn is null.
 static void
 emitTargetKernelSourceIR(CodeGenModule &CGM, llvm::Function *Fn) {
   if (!Fn)
     return;
-  llvm::Module &M = CGM.getModule();
+  CodeGenModule::ForwardedTaskIR R;
+  R.Entry = Fn;
+  R.IsDevice = true;
+  R.Scalarize = false; // keep the raw (generic-mode) device snapshot; CGIR SPMD-izes
+  CGM.addForwardedTaskIR(R);
+}
+
+/// Serialize the recorded forwarded-IR closures (see ForwardedTaskIR) at the end
+/// of Release(), when the module is complete (deferred callee bodies emitted,
+/// OpenMP markers added). Pass 1 serializes each closure (no IR byte-arrays exist
+/// yet, so the clones stay small); pass 2 materializes the globals and fills the
+/// host descriptors / device "<Fn>__ir".
+void CodeGenModule::finalizeForwardedTaskIR() {
+  if (ForwardedTaskIRs.empty())
+    return;
+  llvm::Module &M = getModule();
   llvm::LLVMContext &Ctx = M.getContext();
 
-  llvm::SmallString<4096> Buffer;
-  if (!serializeClosureToBitcode(CGM, Fn, Buffer, /*Externs=*/nullptr))
-    return;
+  struct Serialized {
+    std::string Bitcode;
+    llvm::SmallVector<llvm::GlobalVariable *, 8> Externs;
+    bool Ok = false;
+  };
+  llvm::SmallVector<Serialized, 0> Ser;
+  Ser.resize(ForwardedTaskIRs.size());
 
-  llvm::Constant *Init = llvm::ConstantDataArray::get(
-      Ctx, llvm::ArrayRef<uint8_t>(
-               reinterpret_cast<const uint8_t *>(Buffer.data()),
-               Buffer.size()));
-  // External linkage + llvm.used so the global survives optimization and the
-  // device assembler, landing in the device image's symbol table with its data.
-  // Not marked constant so it goes to ordinary (large) device global storage
-  // rather than the size-limited constant bank; the initializer still lives in
-  // the image and is read host-side via the offload GlobalHandler.
-  auto *GV = new llvm::GlobalVariable(
-      M, Init->getType(), /*isConstant=*/false,
-      llvm::GlobalValue::ExternalLinkage, Init,
-      llvm::Twine(Fn->getName()) + "__ir");
-  llvm::appendToUsed(M, {GV});
+  // Pass 1: serialize the (now complete) closures.
+  for (unsigned I = 0, E = ForwardedTaskIRs.size(); I < E; ++I) {
+    const ForwardedTaskIR &R = ForwardedTaskIRs[I];
+    if (!R.Entry || R.Entry->isDeclaration())
+      continue;
+    llvm::SmallString<4096> Buf;
+    if (!serializeClosureToBitcode(*this, R.Entry, Buf,
+                                   R.IsDevice ? nullptr : &Ser[I].Externs,
+                                   /*OptimizeClone=*/R.Scalarize))
+      continue;
+    Ser[I].Bitcode.assign(Buf.data(), Buf.size());
+    Ser[I].Ok = true;
+  }
+
+  // Pass 2: materialize the IR globals and fill descriptors / device "<Fn>__ir".
+  for (unsigned I = 0, E = ForwardedTaskIRs.size(); I < E; ++I) {
+    const ForwardedTaskIR &R = ForwardedTaskIRs[I];
+    if (!Ser[I].Ok)
+      continue;
+    llvm::Constant *IRInit = llvm::ConstantDataArray::get(
+        Ctx, llvm::ArrayRef<uint8_t>(
+                 reinterpret_cast<const uint8_t *>(Ser[I].Bitcode.data()),
+                 Ser[I].Bitcode.size()));
+
+    if (R.IsDevice) {
+      // External + llvm.used + non-constant so the bytes land in the device
+      // image and are read host-side via the offload GlobalHandler.
+      auto *GV = new llvm::GlobalVariable(
+          M, IRInit->getType(), /*isConstant=*/false,
+          llvm::GlobalValue::ExternalLinkage, IRInit,
+          llvm::Twine(R.Entry->getName()) + "__ir");
+      llvm::appendToUsed(M, {GV});
+      continue;
+    }
+
+    // Host: private constant bitcode global + externs table, then fill the
+    // placeholder descriptor's initializer.
+    auto *IRGV = new llvm::GlobalVariable(
+        M, IRInit->getType(), /*isConstant=*/true,
+        llvm::GlobalValue::PrivateLinkage, IRInit,
+        llvm::Twine(".omp_task_ir.") + R.Entry->getName());
+    IRGV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+
+    std::pair<llvm::Constant *, uint64_t> Ext =
+        buildExternsTable(*this, R.Entry->getName(), Ser[I].Externs);
+
+    llvm::StructType *DescTy = getTaskJitDescTy(*this);
+    llvm::Constant *IRPtr =
+        llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(IRGV, Int8PtrTy);
+    llvm::Constant *ParamsPtr =
+        R.Params ? R.Params : llvm::ConstantPointerNull::get(Int8PtrTy);
+    llvm::Constant *Init = llvm::ConstantStruct::get(
+        DescTy, {IRPtr,
+                 llvm::ConstantInt::get(Int64Ty, Ser[I].Bitcode.size()),
+                 Ext.first,
+                 llvm::ConstantInt::get(Int64Ty, Ext.second),
+                 ParamsPtr,
+                 llvm::ConstantInt::get(Int64Ty, R.ParamsCount),
+                 llvm::ConstantInt::get(Int64Ty, (uint64_t)R.Proto)});
+    assert(R.Descriptor && "host forwarded-IR record without a descriptor");
+    R.Descriptor->setInitializer(Init);
+  }
 }
 
 // One capture exposed as a parameter of an unpacked task. The kernel takes one
@@ -4939,13 +4992,6 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
       !TaskJitNone &&
       !isOpenMPTargetExecutionDirective(D.getDirectiveKind()) &&
       !isOpenMPTargetDataManagementDirective(D.getDirectiveKind());
-  TaskSourceIR TaskIR =
-      emitTaskSourceIR(CGM, EmbedTaskIR ? TaskIRKernel : /*Fn=*/nullptr);
-  llvm::Constant *TaskIRPtr = TaskIR.IRPtr;
-  llvm::Value *TaskIRSize = TaskIR.IRSize;
-  llvm::Constant *TaskIRExternsPtr = TaskIR.ExternsPtr;
-  llvm::Value *TaskIRExternsCount = TaskIR.ExternsCount;
-
   // Unpacked-form extras forwarded to the alloc call: the number of &value arg
   // slots and the scatter helper that fills them. The packed form passes 1 slot
   // (args[0] == kmp_task_t*) and a null scatter (the runtime fills it itself).
@@ -4959,24 +5005,28 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
   // Per-parameter descriptor table (kind + size + packed-buffer offset), so
   // prog-fuse can deduplicate references by pointer and copies by value and
   // pack/reconstruct the buffer. Only the unpacked form has individual
-  // parameters; the packed args[0]==tt form passes null/0.
+  // parameters; the packed args[0]==tt form passes null/0. These are CodeGen-
+  // known and go into the JIT descriptor below.
   llvm::Constant *TaskParamsPtr =
       llvm::ConstantPointerNull::get(CGM.Int8PtrTy);
-  llvm::Value *TaskParamsCount = llvm::ConstantInt::get(CGF.SizeTy, 0);
+  uint64_t TaskParamsCount = 0;
   if (EmbedTaskIR && UnpackedForm) {
     auto PT = emitTaskParamsTable(CGM, TaskIRKernel, UnpackedCaps, TaskPackedOffsets);
     TaskParamsPtr = PT.first;
-    TaskParamsCount = PT.second;
+    TaskParamsCount = cast<llvm::ConstantInt>(PT.second)->getZExtValue();
   }
 
-  // Task-body JIT ABI requested by -fopenmp-task-jit-type. Forwarded to the
-  // runtime so CGIR's prog-fuse/jit produce the matching program shape; only
-  // meaningful for the unpacked (fusable) form. Mirrors
-  // cgir_command_prog_source_proto_t (0 UNPACKED_PARAMS, 2 PACKED_BUFFER).
-  unsigned TaskJitProtoVal =
-      (UnpackedForm && TaskJitPacked) ? /*PACKED_BUFFER*/ 2u
-                                      : /*UNPACKED_PARAMS*/ 0u;
-  llvm::Value *TaskProto = llvm::ConstantInt::get(CGF.Int32Ty, TaskJitProtoVal);
+  // Task-body JIT ABI requested by -fopenmp-task-jit-type; only meaningful for
+  // the unpacked (fusable) form. Mirrors cgir_command_prog_source_proto_t
+  // (0 UNPACKED_PARAMS, 2 PACKED_BUFFER).
+  int64_t TaskProto =
+      (UnpackedForm && TaskJitPacked) ? /*PACKED_BUFFER*/ 2 : /*UNPACKED_PARAMS*/ 0;
+
+  // JIT source descriptor forwarded to the alloc (placeholder, filled at
+  // end-of-TU; null when no IR is forwarded).
+  llvm::Constant *TaskJitDesc = emitTaskJitDescriptor(
+      CGM, EmbedTaskIR ? TaskIRKernel : /*Fn=*/nullptr,
+      /*Scalarize=*/true, TaskParamsPtr, TaskParamsCount, TaskProto);
 
   // Arguments of the func call
   SmallVector<llvm::Value *, 10> AllocArgs = {
@@ -5006,15 +5056,9 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
     AllocArgs.push_back(DeviceID);
     AllocArgs.push_back(Ndeps);
     AllocArgs.push_back(Nacs);
-    AllocArgs.push_back(TaskIRPtr);
-    AllocArgs.push_back(TaskIRSize);
-    AllocArgs.push_back(TaskIRExternsPtr);
-    AllocArgs.push_back(TaskIRExternsCount);
+    AllocArgs.push_back(TaskJitDesc);
     AllocArgs.push_back(UnpackedNArgs);
     AllocArgs.push_back(ScatterArg);
-    AllocArgs.push_back(TaskParamsPtr);
-    AllocArgs.push_back(TaskParamsCount);
-    AllocArgs.push_back(TaskProto);
     NewTask = CGF.EmitRuntimeCall(
         OMPBuilder.getOrCreateRuntimeFunction(
             CGM.getModule(), OMPRTL___kmpc_omp_target_task_alloc_with_deps),
@@ -5023,15 +5067,9 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
   } else {
     AllocArgs.push_back(Ndeps);
     AllocArgs.push_back(Nacs);
-    AllocArgs.push_back(TaskIRPtr);
-    AllocArgs.push_back(TaskIRSize);
-    AllocArgs.push_back(TaskIRExternsPtr);
-    AllocArgs.push_back(TaskIRExternsCount);
+    AllocArgs.push_back(TaskJitDesc);
     AllocArgs.push_back(UnpackedNArgs);
     AllocArgs.push_back(ScatterArg);
-    AllocArgs.push_back(TaskParamsPtr);
-    AllocArgs.push_back(TaskParamsCount);
-    AllocArgs.push_back(TaskProto);
     NewTask =
         CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
                                 CGM.getModule(), OMPRTL___kmpc_omp_task_alloc_with_deps),

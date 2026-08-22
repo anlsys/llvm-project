@@ -449,6 +449,27 @@ private:
     }
   }
 
+public:
+  /// A task / target-kernel body whose LLVM-IR closure is forwarded to the OpenMP
+  /// runtime for JIT (-fopenmp-task-jit-type). Recorded during CodeGen (emitting
+  /// only a stable placeholder) and serialized at end-of-TU
+  /// (finalizeForwardedTaskIR), so the closure captures the complete module.
+  struct ForwardedTaskIR {
+    llvm::Function *Entry = nullptr;
+    bool IsDevice = false;                 ///< device "<Entry>__ir" vs host descriptor
+    bool Scalarize = false;                ///< run the host task-closure scalarizer
+    llvm::GlobalVariable *Descriptor = nullptr; ///< host descriptor to fill; null for device
+    llvm::Constant *Params = nullptr;      ///< host params table (i8*) or null
+    uint64_t ParamsCount = 0;
+    int64_t Proto = 0;
+  };
+  void addForwardedTaskIR(const ForwardedTaskIR &R) { ForwardedTaskIRs.push_back(R); }
+  /// Serialize the recorded forwarded-IR closures; called at the end of Release().
+  void finalizeForwardedTaskIR();
+
+private:
+  llvm::SmallVector<ForwardedTaskIR, 0> ForwardedTaskIRs;
+
   /// List of alias we have emitted. Used to make sure that what they point to
   /// is defined once we get to the end of the of the translation unit.
   std::vector<GlobalDecl> Aliases;
