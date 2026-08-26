@@ -4048,7 +4048,7 @@ defm openmp_extensions: BoolFOption<"openmp-extensions",
           "Disable all Clang extensions for OpenMP directives and clauses">>;
 def fopenmp_EQ : Joined<["-"], "fopenmp=">, Group<f_Group>,
   Visibility<[ClangOption, CC1Option, FlangOption, FC1Option]>;
-def fopenmp_task_jit_type_EQ : Joined<["-"], "fopenmp-task-jit-type=">, Group<f_Group>,
+def fopenmp_task_jit_abi_EQ : Joined<["-"], "fopenmp-task-jit-abi=">, Group<f_Group>,
   Visibility<[ClangOption, CC1Option]>,
   Values<"none,pointers,packed">, NormalizedValuesScope<"LangOptions">,
   NormalizedValues<["OMPTaskJit_None", "OMPTaskJit_Pointers", "OMPTaskJit_Packed"]>,

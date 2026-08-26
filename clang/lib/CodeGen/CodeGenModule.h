@@ -451,7 +451,7 @@ private:
 
 public:
   /// A task / target-kernel body whose LLVM-IR closure is forwarded to the OpenMP
-  /// runtime for JIT (-fopenmp-task-jit-type). Recorded during CodeGen (emitting
+  /// runtime for JIT (-fopenmp-task-jit-abi). Recorded during CodeGen (emitting
   /// only a stable placeholder) and serialized at end-of-TU
   /// (finalizeForwardedTaskIR), so the closure captures the complete module.
   struct ForwardedTaskIR {

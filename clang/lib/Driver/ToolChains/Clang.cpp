@@ -6918,7 +6918,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
                       options::OPT_fno_openmp_simd);
       Args.AddAllArgs(CmdArgs, options::OPT_fopenmp_enable_irbuilder);
       Args.AddAllArgs(CmdArgs, options::OPT_fopenmp_version_EQ);
-      Args.AddAllArgs(CmdArgs, options::OPT_fopenmp_task_jit_type_EQ);
+      Args.AddAllArgs(CmdArgs, options::OPT_fopenmp_task_jit_abi_EQ);
       if (!Args.hasFlag(options::OPT_fopenmp_extensions,
                         options::OPT_fno_openmp_extensions, /*Default=*/true))
         CmdArgs.push_back("-fno-openmp-extensions");

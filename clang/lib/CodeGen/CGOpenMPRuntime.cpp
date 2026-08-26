@@ -4534,7 +4534,7 @@ static llvm::Function *emitTaskUnpackedScatter(CodeGenModule &CGM, SourceLocatio
 }
 
 /// Emit the self-contained packed-buffer kernel for a packed-ABI task
-/// (-fopenmp-task-jit-type=packed):
+/// (-fopenmp-task-jit-abi=packed):
 ///   void .omp_task_kernel.(i8 *buf, i64 size)
 /// It rebuilds a local KmpTaskTWithPrivates (+ a local shareds record if there
 /// are shared captures) by reading each capture from `buf` at its fixed offset
@@ -4860,7 +4860,7 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
           : std::next(KmpTaskTWithPrivatesQTyRD->field_begin(), 1)
                 ->getType()
                 ->castAsRecordDecl();
-  // The default (-fopenmp-task-jit-type=none) forwards NO task-body IR to the
+  // The default (-fopenmp-task-jit-abi=none) forwards NO task-body IR to the
   // runtime: every JIT-related alloc argument below is null/0 and the runtime
   // just runs the ahead-of-time proxy routine, like stock libomp. The packed
   // ABI forwards a self-contained void(void*,size_t) kernel and enables
@@ -4912,7 +4912,7 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
   } else if (!TaskJitNone) {
     TaskIRKernel = emitPackedTaskKernel(CGM, Loc, TaskEntry);
   }
-  // For -fopenmp-task-jit-type=none, TaskIRKernel/ScatterFn stay null and no
+  // For -fopenmp-task-jit-abi=none, TaskIRKernel/ScatterFn stay null and no
   // task-body IR is emitted or forwarded (see the null/0 alloc arguments below).
 
   // Build call kmp_task_t * __kmpc_omp_task_alloc(ident_t *, kmp_int32 gtid,
@@ -5025,7 +5025,7 @@ CGOpenMPRuntime::emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
     TaskParamsCount = cast<llvm::ConstantInt>(PT.second)->getZExtValue();
   }
 
-  // Task-body JIT ABI requested by -fopenmp-task-jit-type; only meaningful for
+  // Task-body JIT ABI requested by -fopenmp-task-jit-abi; only meaningful for
   // the unpacked (fusable) form. Mirrors cgir_command_prog_source_proto_t
   // (0 UNPACKED_PARAMS, 2 PACKED_BUFFER).
   int64_t TaskProto =
@@ -7643,7 +7643,7 @@ void CGOpenMPRuntime::emitTargetOutlinedFunctionHelper(
 
   // On device compilation, embed the kernel's LLVM-IR into the device image so
   // the host runtime can forward it to XKOMP (see emitTargetKernelSourceIR).
-  // Suppressed under -fopenmp-task-jit-type=none: no device IR/PTX is forwarded
+  // Suppressed under -fopenmp-task-jit-abi=none: no device IR/PTX is forwarded
   // (ordinary offload still uses the normally-compiled device image).
   if (CGM.getLangOpts().OpenMPIsTargetDevice && IsOffloadEntry &&
       CGM.getLangOpts().getOpenMPTaskJitType() != LangOptions::OMPTaskJit_None)
