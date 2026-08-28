@@ -982,6 +982,19 @@ OMPTaskgroupDirective *OMPTaskgroupDirective::CreateEmpty(const ASTContext &C,
       C, NumClauses, /*HasAssociatedStmt=*/true, /*NumChildren=*/1);
 }
 
+OMPTaskgraphloopDirective *OMPTaskgraphloopDirective::Create(const ASTContext &C, SourceLocation StartLoc, SourceLocation EndLoc,
+                                                             ArrayRef<OMPClause *> Clauses, Stmt *AssociatedStmt, 
+                                                             Expr* start, Expr* end, Expr* iter) {  
+  auto* Dir = createDirective<OMPTaskgraphloopDirective>(C, Clauses, AssociatedStmt, /*NumChildren=*/0, StartLoc, EndLoc);
+  Dir->setLoopInfo(start, end, iter);
+  return Dir;
+}
+
+OMPTaskgraphloopDirective *OMPTaskgraphloopDirective::CreateEmpty(const ASTContext &C, unsigned NumClauses, EmptyShell)
+{
+   return createEmptyDirective<OMPTaskgraphloopDirective>(C, NumClauses, /*HasAssociatedStmt=*/true);
+}
+
 OMPCancellationPointDirective *OMPCancellationPointDirective::Create(
     const ASTContext &C, SourceLocation StartLoc, SourceLocation EndLoc,
     OpenMPDirectiveKind CancelRegion) {

@@ -1700,6 +1700,13 @@ public:
         Kind, DirName, Clauses, AStmt, StartLoc, EndLoc);
   }
 
+  OMPClause *RebuildOMPGraphIdClause(Expr *Id, SourceLocation StartLoc,
+                                   SourceLocation LParenLoc,
+                                   SourceLocation EndLoc) {
+    return getSema().OpenMP().ActOnOpenMPGraphIdClause(Id, StartLoc, LParenLoc,
+                                                      EndLoc);
+  }
+
   /// Build a new OpenMP 'if' clause.
   ///
   /// By default, performs semantic analysis to build the new OpenMP clause.
@@ -10035,6 +10042,17 @@ StmtResult TreeTransform<Derived>::TransformOMPTaskgroupDirective(
 }
 
 template <typename Derived>
+StmtResult TreeTransform<Derived>::TransformOMPTaskgraphloopDirective(
+    OMPTaskgraphloopDirective *D) {
+  DeclarationNameInfo DirName;
+  getDerived().getSema().OpenMP().StartOpenMPDSABlock(
+      OMPD_taskgraphloop, DirName, nullptr, D->getBeginLoc());
+  StmtResult Res = getDerived().TransformOMPExecutableDirective(D);
+  getDerived().getSema().OpenMP().EndOpenMPDSABlock(Res.get());
+  return Res;
+}
+
+template <typename Derived>
 StmtResult
 TreeTransform<Derived>::TransformOMPFlushDirective(OMPFlushDirective *D) {
   DeclarationNameInfo DirName;
@@ -10575,6 +10593,17 @@ TreeTransform<Derived>::TransformOMPTargetParallelGenericLoopDirective(
 //===----------------------------------------------------------------------===//
 // OpenMP clause transformation
 //===----------------------------------------------------------------------===//
+
+template <typename Derived>
+OMPClause *
+TreeTransform<Derived>::TransformOMPGraphIdClause(OMPGraphIdClause *C) {
+  ExprResult E = getDerived().TransformExpr(C->getId());
+  if (E.isInvalid())
+    return nullptr;
+  return getDerived().RebuildOMPGraphIdClause(
+      E.get(), C->getBeginLoc(), C->getLParenLoc(), C->getEndLoc());
+}
+
 template <typename Derived>
 OMPClause *TreeTransform<Derived>::TransformOMPIfClause(OMPIfClause *C) {
   ExprResult Cond = getDerived().TransformExpr(C->getCondition());

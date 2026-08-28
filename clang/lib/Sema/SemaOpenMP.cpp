@@ -6605,6 +6605,9 @@ StmtResult SemaOpenMP::ActOnOpenMPExecutableDirective(
     Res = ActOnOpenMPTaskgroupDirective(ClausesWithImplicit, AStmt, StartLoc,
                                         EndLoc);
     break;
+  case OMPD_taskgraphloop:
+    Res = ActOnOpenMPTaskgraphloopDirective(ClausesWithImplicit, AStmt, StartLoc, EndLoc);
+    break;
   case OMPD_flush:
     assert(AStmt == nullptr &&
            "No associated statement allowed for 'omp flush' directive");
@@ -6856,6 +6859,8 @@ StmtResult SemaOpenMP::ActOnOpenMPExecutableDirective(
       case OMPC_final:
       case OMPC_priority:
       case OMPC_novariants:
+      case OMPC_graph_id:
+      case OMPC_loop_unroll:
       case OMPC_nocontext:
         // Do not analyze if no parent parallel directive.
         if (isOpenMPParallelDirective(Kind))
@@ -11507,6 +11512,40 @@ SemaOpenMP::ActOnOpenMPTaskgroupDirective(ArrayRef<OMPClause *> Clauses,
   return OMPTaskgroupDirective::Create(getASTContext(), StartLoc, EndLoc,
                                        Clauses, AStmt,
                                        DSAStack->getTaskgroupReductionRef());
+}
+
+StmtResult
+SemaOpenMP::ActOnOpenMPTaskgraphloopDirective(ArrayRef<OMPClause *> Clauses,
+                                          Stmt *AStmt, SourceLocation StartLoc,
+                                          SourceLocation EndLoc) {  
+  
+  if (!AStmt)
+    return StmtError();
+
+  // Marks the enclosing function as containing a scope that needs special 
+  // cleanup/branch handling (copied from taskgroup).
+  // SemaRef.setFunctionHasBranchProtectedScope();
+
+  // TODO: Check if loop unrolling is present.
+
+  auto *CS = cast<CapturedStmt>(AStmt);
+  auto *FS = dyn_cast_or_null<ForStmt>(CS->getCapturedStmt());
+  if (!FS)
+    return StmtError();
+
+  // Check that taskgraphloop in annotating a for loop. 
+  OMPLoopBasedDirective::HelperExprs B;
+  SemaOpenMP::VarsWithInheritedDSAType VarsWithImplicitDSA;
+  unsigned NestedLoopCount =
+      checkOpenMPLoop(OMPD_for, getCollapseNumberExpr(Clauses),
+                      /*OrderedLoopCountExpr=*/nullptr, AStmt, SemaRef,
+                      *DSAStack, VarsWithImplicitDSA, B);
+  
+  if (NestedLoopCount == 0)
+    return StmtError();
+
+  return OMPTaskgraphloopDirective::Create(getASTContext(), StartLoc, EndLoc,
+                                           Clauses, AStmt, B.LB, B.UB, B.ST);
 }
 
 StmtResult SemaOpenMP::ActOnOpenMPFlushDirective(ArrayRef<OMPClause *> Clauses,
@@ -16908,6 +16947,9 @@ OMPClause *SemaOpenMP::ActOnOpenMPSingleExprClause(OpenMPClauseKind Kind,
   case OMPC_detach:
     Res = ActOnOpenMPDetachClause(Expr, StartLoc, LParenLoc, EndLoc);
     break;
+  case OMPC_graph_id:
+    Res = ActOnOpenMPGraphIdClause(Expr, StartLoc, LParenLoc, EndLoc);
+    break;
   case OMPC_novariants:
     Res = ActOnOpenMPNovariantsClause(Expr, StartLoc, LParenLoc, EndLoc);
     break;
@@ -17696,6 +17738,7 @@ OMPClause *SemaOpenMP::ActOnOpenMPSimpleClause(
   case OMPC_match:
   case OMPC_nontemporal:
   case OMPC_destroy:
+  case OMPC_graph_id:
   case OMPC_novariants:
   case OMPC_nocontext:
   case OMPC_detach:
@@ -18439,6 +18482,7 @@ OMPClause *SemaOpenMP::ActOnOpenMPSingleExprWithArgClause(
   case OMPC_severity:
   case OMPC_message:
   case OMPC_destroy:
+  case OMPC_graph_id:
   case OMPC_novariants:
   case OMPC_nocontext:
   case OMPC_detach:
@@ -18701,6 +18745,7 @@ OMPClause *SemaOpenMP::ActOnOpenMPClause(OpenMPClauseKind Kind,
   case OMPC_to:
   case OMPC_from:
   case OMPC_use_device_ptr:
+  case OMPC_graph_id:
   case OMPC_use_device_addr:
   case OMPC_is_device_ptr:
   case OMPC_has_device_addr:
@@ -19008,6 +19053,26 @@ static bool isValidInteropVariable(Sema &SemaRef, Expr *InteropVarExpr,
     return false;
   }
   return true;
+}
+
+OMPClause *SemaOpenMP::ActOnOpenMPGraphIdClause(Expr *Id,
+                                                SourceLocation StartLoc,
+                                                SourceLocation LParenLoc,
+                                                SourceLocation EndLoc) {
+  Expr *ValExpr = Id;
+
+  if (!Id->isValueDependent() && !Id->isTypeDependent() &&
+      !Id->isInstantiationDependent() &&
+      !Id->containsUnexpandedParameterPack()) {
+    ExprResult Val = PerformOpenMPImplicitIntegerConversion(LParenLoc, Id);
+    if (Val.isInvalid())
+      return nullptr;
+
+    ValExpr = Val.get();
+  }
+
+  return new (getASTContext())
+      OMPGraphIdClause(ValExpr, StartLoc, LParenLoc, EndLoc);
 }
 
 OMPClause *SemaOpenMP::ActOnOpenMPInitClause(
@@ -19371,6 +19436,7 @@ OMPClause *SemaOpenMP::ActOnOpenMPVarListClause(OpenMPClauseKind Kind,
   case OMPC_match:
   case OMPC_order:
   case OMPC_at:
+  case OMPC_graph_id:
   case OMPC_severity:
   case OMPC_message:
   case OMPC_destroy:

@@ -363,6 +363,7 @@ __OMP_RTL(__kmpc_omp_task_alloc_with_deps, false, /* kmp_task_t */ VoidPtr, Iden
           /* jit proto */ Int32)
 __OMP_RTL(__kmpc_omp_task, false, Int32, IdentPtr, Int32,
           /* kmp_task_t */ VoidPtr)
+__OMP_RTL(xkomp_taskgraphloop, false, Void, VoidPtr, IdentPtr, Int32, Int32, Int32)
 __OMP_RTL(__kmpc_end_taskgroup, false, Void, IdentPtr, Int32)
 __OMP_RTL(__kmpc_taskgroup, false, Void, IdentPtr, Int32)
 __OMP_RTL(__kmpc_omp_task_begin_if0, false, Void, IdentPtr, Int32,

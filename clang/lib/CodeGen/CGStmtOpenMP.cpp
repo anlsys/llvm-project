@@ -1691,6 +1691,7 @@ void CodeGenFunction::EmitOMPReductionClauseInit(
     case OMPD_target_exit_data:
     case OMPD_taskloop:
     case OMPD_taskloop_simd:
+    case OMPD_taskgraphloop:
     case OMPD_master_taskloop:
     case OMPD_master_taskloop_simd:
     case OMPD_parallel_master_taskloop:
@@ -5962,6 +5963,29 @@ void CodeGenFunction::EmitOMPTaskwaitDirective(const OMPTaskwaitDirective &S) {
 
 static bool isSupportedByOpenMPIRBuilder(const OMPTaskgroupDirective &T) {
   return T.clauses().empty();
+}
+
+void CodeGenFunction::EmitOMPTaskgraphloopDirective(const OMPTaskgraphloopDirective &S)
+{
+  auto &&CodeGen = [&S](CodeGenFunction &CGF, PrePostActionTy &Action) { 
+    Action.Enter(CGF);
+
+    // If we have a pragma that is present, then we can perform the loop unroll. 
+    if (perform_loop_unroll) {
+
+      uint64_t Factor = 0;
+      bool perform_loop_unroll = false;
+      for (const auto *C : S.getClausesOfKind<OMPLoopUnrollClause>()) {
+        if (Expr *FactorExpr = PartialClause->getNum()) {
+          Factor = FactorExpr->EvaluateKnownConstInt(getContext()).getZExtValue();
+            assert(Factor >= 1 && "Only positive factors are valid");
+          }
+          OMPBuilder.unrollLoopPartial(DL, CLI, Factor,
+                                       NeedsUnrolledCLI ? &UnrolledCLI : nullptr);
+        }
+      }
+  };
+  CGM.getOpenMPRuntime().emitTaskgraphloopRegion(*this, S, CodeGen, S.getBeginLoc());
 }
 
 void CodeGenFunction::EmitOMPTaskgroupDirective(

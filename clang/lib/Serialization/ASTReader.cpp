@@ -11705,6 +11705,12 @@ OMPClause *OMPClauseReader::readClause() {
   case llvm::omp::OMPC_grainsize:
     C = new (Context) OMPGrainsizeClause();
     break;
+  case llvm::omp::OMPC_graph_id:
+    C = new (Context) OMPGraphIdClause();
+    break;
+  case llvm::omp::OMPC_loop_unroll:
+    C = new (Context) OMPLoopUnrollClause();
+    break;
   case llvm::omp::OMPC_num_tasks:
     C = new (Context) OMPNumTasksClause();
     break;
@@ -11988,6 +11994,16 @@ void OMPClauseReader::VisitOMPScheduleClause(OMPScheduleClause *C) {
   C->setSecondScheduleModifierLoc(Record.readSourceLocation());
   C->setScheduleKindLoc(Record.readSourceLocation());
   C->setCommaLoc(Record.readSourceLocation());
+}
+
+void OMPClauseReader::VisitOMPGraphIdClause(OMPGraphIdClause *C) {
+  C->setId(Record.readSubExpr());
+  C->setLParenLoc(Record.readSourceLocation());
+}
+
+void OMPClauseReader::VisitOMPLoopUnrollClause(OMPLoopUnrollClause *C) {
+  C->setNum(Record.readSubExpr());
+  C->setLParenLoc(Record.readSourceLocation());
 }
 
 void OMPClauseReader::VisitOMPOrderedClause(OMPOrderedClause *C) {

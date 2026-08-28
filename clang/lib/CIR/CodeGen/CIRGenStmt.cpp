@@ -280,6 +280,8 @@ mlir::LogicalResult CIRGenFunction::emitStmt(const Stmt *s,
         cast<OMPParallelSectionsDirective>(*s));
   case Stmt::OMPTaskDirectiveClass:
     return emitOMPTaskDirective(cast<OMPTaskDirective>(*s));
+  case Stmt::OMPTaskgraphloopDirectiveClass:
+    return emitOMPTaskgraphloopDirective(cast<OMPTaskgraphloopDirective>(*s));
   case Stmt::OMPTaskgroupDirectiveClass:
     return emitOMPTaskgroupDirective(cast<OMPTaskgroupDirective>(*s));
   case Stmt::OMPFlushDirectiveClass:

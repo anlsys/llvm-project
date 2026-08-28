@@ -250,7 +250,10 @@ def OMPC_GrainSize : Clause<[Spelling<"grainsize">]> {
   ];
 }
 def OMPC_GraphId : Clause<[Spelling<"graph_id">]> {
-  let flangClass = "OmpGraphIdClause";
+  let clangClass = "OMPGraphIdClause";
+}
+def OMPC_LoopUnroll : Clause<[Spelling<"loop_unroll">]> {
+  let clangClass = "OMPLoopUnrollClause";
 }
 def OMPC_GraphReset : Clause<[Spelling<"graph_reset">]> {
   let flangClass = "OmpGraphResetClause";
@@ -1339,6 +1342,14 @@ def OMP_Taskgraph : Directive<[Spelling<"taskgraph">]> {
     VersionedClause<OMPC_GraphReset, 60>,
     VersionedClause<OMPC_If>,
     VersionedClause<OMPC_NoGroup>,
+  ];
+  let association = AS_Block;
+  let category = CA_Executable;
+}
+def OMP_Taskgraphloop : Directive<[Spelling<"taskgraphloop">]> {
+  let allowedOnceClauses = [
+    VersionedClause<OMPC_GraphId, 60>,
+    VersionedClause<OMPC_LoopUnroll>
   ];
   let association = AS_Block;
   let category = CA_Executable;

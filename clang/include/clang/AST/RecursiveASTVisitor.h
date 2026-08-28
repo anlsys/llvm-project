@@ -3288,6 +3288,9 @@ DEF_TRAVERSE_STMT(OMPBarrierDirective,
 DEF_TRAVERSE_STMT(OMPTaskwaitDirective,
                   { TRY_TO(TraverseOMPExecutableDirective(S)); })
 
+DEF_TRAVERSE_STMT(OMPTaskgraphloopDirective,
+                  { TRY_TO(TraverseOMPExecutableDirective(S)); })
+
 DEF_TRAVERSE_STMT(OMPTaskgroupDirective,
                   { TRY_TO(TraverseOMPExecutableDirective(S)); })
 
@@ -4196,6 +4199,19 @@ bool RecursiveASTVisitor<Derived>::VisitOMPDetachClause(OMPDetachClause *C) {
   TRY_TO(TraverseStmt(C->getEventHandler()));
   return true;
 }
+
+template <typename Derived>
+bool RecursiveASTVisitor<Derived>::VisitOMPGraphIdClause(OMPGraphIdClause *C) {
+  TRY_TO(TraverseStmt(C->getId()));
+  return true;
+}
+
+template <typename Derived>
+bool RecursiveASTVisitor<Derived>::VisitOMPLoopUnrollClause(OMPLoopUnrollClause *C) {
+  TRY_TO(TraverseStmt(C->getNum()));
+  return true;
+}
+
 
 template <typename Derived>
 bool RecursiveASTVisitor<Derived>::VisitOMPUsesAllocatorsClause(

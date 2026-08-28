@@ -287,6 +287,9 @@ void CodeGenFunction::EmitStmt(const Stmt *S, ArrayRef<const Attr *> Attrs) {
   case Stmt::OMPTaskwaitDirectiveClass:
     EmitOMPTaskwaitDirective(cast<OMPTaskwaitDirective>(*S));
     break;
+  case Stmt::OMPTaskgraphloopDirectiveClass:
+    EmitOMPTaskgraphloopDirective(cast<OMPTaskgraphloopDirective>(*S));
+    break;
   case Stmt::OMPTaskgroupDirectiveClass:
     EmitOMPTaskgroupDirective(cast<OMPTaskgroupDirective>(*S));
     break;

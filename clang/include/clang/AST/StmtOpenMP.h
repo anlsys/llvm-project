@@ -2760,6 +2760,101 @@ public:
   }
 };
 
+
+/// This represents '#pragma omp taskgraphloop' directive.
+///
+/// \code
+/// #pragma omp taskgraphloop
+/// \endcode
+///
+class OMPTaskgraphloopDirective : public OMPExecutableDirective {
+  friend class ASTStmtReader;
+  friend class OMPExecutableDirective;
+  
+  // loop info to be passed to runtime.
+  Expr *LB = nullptr;
+  Expr *UB = nullptr;
+  Expr *ST = nullptr;
+  
+  /// Build directive with the given start and end location.
+  ///
+  /// \param StartLoc Starting location of the directive kind.
+  /// \param EndLoc Ending location of the directive.
+  ///
+  OMPTaskgraphloopDirective(SourceLocation StartLoc, SourceLocation EndLoc)
+      : OMPExecutableDirective(OMPTaskgraphloopDirectiveClass,
+                               llvm::omp::OMPD_taskgraphloop, StartLoc, EndLoc) {}
+
+  /// Build an empty directive.
+  ///
+  explicit OMPTaskgraphloopDirective()
+      : OMPExecutableDirective(OMPTaskgraphloopDirectiveClass,
+                               llvm::omp::OMPD_taskgraphloop, SourceLocation(),
+                               SourceLocation()) {}
+        
+public:
+  /// Creates directive.
+  ///
+  /// \param C AST context.
+  /// \param StartLoc Starting location of the directive kind.
+  /// \param EndLoc Ending Location of the directive.
+  /// \param Clauses List of clauses.
+  /// \param AssociatedStmt Statement, associated with the directive.
+  /// \param ReductionRef Reference to the task_reduction return variable.
+  /// \param start Lower bound of nested loop.
+  /// \param end Upper bound of nested loop.
+  /// \param incr Step each iteration for nested loop.
+  ///
+  static OMPTaskgraphloopDirective *
+  Create(const ASTContext &C, SourceLocation StartLoc, SourceLocation EndLoc,
+         ArrayRef<OMPClause *> Clauses, Stmt *AssociatedStmt, 
+         Expr* start, Expr* end, Expr* incr);
+
+  /// Creates an empty directive.
+  ///
+  /// \param C AST context.
+  /// \param NumClauses Number of clauses.
+  ///
+  static OMPTaskgraphloopDirective *CreateEmpty(const ASTContext &C,
+                                            unsigned NumClauses, EmptyShell);
+
+  // static OMPTaskgraphloopDirective *CreateEmpty(const ASTContext &C,
+  //                                               unsigned NumClauses, EmptyShell);
+  
+  /// Sets loop info to be passed to XKOMP runtime.
+  ///
+  /// \param start Lower bound of nested loop.
+  /// \param end Upper bound of nested loop.
+  /// \param incr Step each iteration for nested loop.
+  ///
+  void setLoopInfo(Expr* start, Expr* end, Expr* iter)
+  {
+    LB = start;
+    UB = end;
+    ST = iter;
+  }
+
+  Expr* getLoopLB() const
+  {
+    return LB;
+  }
+
+  Expr* getLoopUB() const
+  {
+    return UB;
+  }
+
+  Expr* getLoopStep() const
+  {
+    return ST;
+  }
+
+  static bool classof(const Stmt *T) {
+    return T->getStmtClass() == OMPTaskgraphloopDirectiveClass;
+  }
+};
+
+
 /// This represents '#pragma omp taskgroup' directive.
 ///
 /// \code
@@ -2856,7 +2951,7 @@ public:
   ///
   /// \param C AST context.
   /// \param StartLoc Starting location of the directive kind.
-  /// \param EndLoc Ending Location of the directive.
+  /// \, EndLoc Ending Location of the directive.
   /// \param Clauses List of clauses (only single OMPFlushClause clause is
   /// allowed).
   ///

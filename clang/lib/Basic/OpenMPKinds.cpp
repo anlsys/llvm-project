@@ -266,6 +266,8 @@ unsigned clang::getOpenMPSimpleClauseType(OpenMPClauseKind Kind, StringRef Str,
   case OMPC_allocator:
   case OMPC_collapse:
   case OMPC_private:
+  case OMPC_graph_id:
+  case OMPC_loop_unroll:
   case OMPC_firstprivate:
   case OMPC_shared:
   case OMPC_task_reduction:
@@ -656,6 +658,8 @@ const char *clang::getOpenMPSimpleClauseTypeName(OpenMPClauseKind Kind,
   case OMPC_allocator:
   case OMPC_collapse:
   case OMPC_private:
+  case OMPC_graph_id:
+  case OMPC_loop_unroll:
   case OMPC_firstprivate:
   case OMPC_shared:
   case OMPC_task_reduction:
@@ -981,6 +985,7 @@ void clang::getOpenMPCaptureRegions(
     case OMPD_single:
     case OMPD_target_data:
     case OMPD_taskgraph:
+    case OMPD_taskgraphloop:
     case OMPD_taskgroup:
     case OMPD_stripe:
       // These directives (when standalone) use OMPD_unknown as the region,

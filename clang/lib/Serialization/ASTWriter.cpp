@@ -8637,6 +8637,16 @@ void OMPClauseWriter::VisitOMPGrainsizeClause(OMPGrainsizeClause *C) {
   Record.AddSourceLocation(C->getLParenLoc());
 }
 
+void OMPClauseWriter::VisitOMPGraphIdClause(OMPGraphIdClause *C) {
+  Record.AddStmt(C->getId());
+  Record.AddSourceLocation(C->getLParenLoc());
+}
+
+void OMPClauseWriter::VisitOMPLoopUnrollClause(OMPLoopUnrollClause *C) {
+  Record.AddStmt(C->getNum());
+  Record.AddSourceLocation(C->getLParenLoc());
+}
+
 void OMPClauseWriter::VisitOMPNumTasksClause(OMPNumTasksClause *C) {
   VisitOMPClauseWithPreInit(C);
   Record.writeEnum(C->getModifier());

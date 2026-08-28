@@ -253,6 +253,8 @@ const OMPClauseWithPostUpdate *OMPClauseWithPostUpdate::get(const OMPClause *C) 
   case OMPC_num_teams:
   case OMPC_thread_limit:
   case OMPC_priority:
+  case OMPC_graph_id:
+  case OMPC_loop_unroll:
   case OMPC_grainsize:
   case OMPC_nogroup:
   case OMPC_num_tasks:
@@ -1978,6 +1980,24 @@ void OMPClausePrinter::VisitOMPIfClause(OMPIfClause *Node) {
     OS << getOpenMPDirectiveName(Node->getNameModifier(), Version) << ": ";
   Node->getCondition()->printPretty(OS, nullptr, Policy, 0);
   OS << ")";
+}
+
+void OMPClausePrinter::VisitOMPGraphIdClause(OMPGraphIdClause *Node) {
+  OS << "graph_id";
+  if (Expr *E = Node->getId()) {
+    OS << "(";
+    E->printPretty(OS, nullptr, Policy, 0);
+    OS << ")";
+  }
+}
+
+void OMPClausePrinter::VisitOMPLoopUnrollClause(OMPLoopUnrollClause *Node) {
+  OS << "loop_unroll";
+  if (Expr *E = Node->getNum()) {
+    OS << "(";
+    E->printPretty(OS, nullptr, Policy, 0);
+    OS << ")";
+  }
 }
 
 void OMPClausePrinter::VisitOMPFinalClause(OMPFinalClause *Node) {

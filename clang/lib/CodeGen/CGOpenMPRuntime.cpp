@@ -67,6 +67,8 @@ public:
     ParallelOutlinedRegion,
     /// Region with outlined function for standalone 'task' directive.
     TaskOutlinedRegion,
+    /// Region with outlined function for standalone 'taskgraph' directive.
+    TaskgraphloopOutlinedRegion,
     /// Region for constructs that do not require function outlining,
     /// like 'for', 'sections', 'atomic' etc. directives.
     InlinedRegion,
@@ -351,6 +353,26 @@ public:
 
 private:
   StringRef HelperName;
+};
+
+/// API for captured statement code generation in OpenMP taskgraphs.
+class CGOpenMPTaskgraphloopRegionInfo final : public CGOpenMPRegionInfo {
+public:
+  CGOpenMPTaskgraphloopRegionInfo(const CapturedStmt &CS,
+                              const RegionCodeGenTy &CodeGen)
+      : CGOpenMPRegionInfo(CS, TaskgraphloopOutlinedRegion, CodeGen,
+                          llvm::omp::OMPD_taskgraphloop, false) {}
+
+  const VarDecl *getThreadIDVariable() const override { return 0; }
+
+  /// Get the name of the capture helper.
+  StringRef getHelperName() const override { return "taskgraphloop.omp_outlined."; }
+
+  static bool classof(const CGCapturedStmtInfo *Info) {
+    return CGOpenMPRegionInfo::classof(Info) &&
+          cast<CGOpenMPRegionInfo>(Info)->getRegionKind() ==
+              TaskgraphloopOutlinedRegion;
+  }
 };
 
 static void EmptyCodeGen(CodeGenFunction &, PrePostActionTy &) {
@@ -2226,6 +2248,165 @@ void CGOpenMPRuntime::emitTaskyieldCall(CodeGenFunction &CGF,
 
   if (auto *Region = dyn_cast_or_null<CGOpenMPRegionInfo>(CGF.CapturedStmtInfo))
     Region->emitUntiedSwitch(CGF);
+}
+
+void CGOpenMPRuntime::emitTaskgraphloopRegion(CodeGenFunction &CGF,
+                               const OMPTaskgraphloopDirective &D,
+                               const RegionCodeGenTy &TaskgraphloopOpGen,
+                               SourceLocation Loc)
+{
+  if (!CGF.HaveInsertPoint())
+    return;
+
+  const auto *CS = cast<CapturedStmt>(D.getAssociatedStmt());
+  const auto *FS = cast<ForStmt>(CS->getCapturedStmt());
+
+  // Get lower bound of for loop. Can either be a Binary Operator assigning a value to
+  // an existing variable or declaring a new variable. 
+  llvm::Value *LB = llvm::ConstantInt::get(CGF.Int32Ty, 0);
+  if (const auto *DS = dyn_cast_or_null<DeclStmt>(FS->getInit())) {
+    // Assume there is only one declaration.
+    if (DS->isSingleDecl()) {
+      if (const auto *VD = dyn_cast<VarDecl>(DS->getSingleDecl())) {
+        // If `if (int i = 0; ...)`
+        if (const Expr *InitE = VD->getInit()) {
+          LB = CGF.EmitScalarExpr(InitE);
+          LB = CGF.Builder.CreateIntCast(LB, CGF.Int32Ty, true);
+        }
+        // If `int i; if (i = 0; ...)`
+        else if (const auto *BO = dyn_cast_or_null<BinaryOperator>(FS->getInit())) {
+          if (BO->getOpcode() == BO_Assign) {
+            LB = CGF.EmitScalarExpr(BO->getRHS());
+            LB = CGF.Builder.CreateIntCast(LB, CGF.Int32Ty, true);
+          }
+        }
+      }
+    }
+  }
+
+  
+  // Get the step/stride. Need to handle the potential options that could occur.
+  // This does not have fully coverage yet, so work still needs to be done to add it.
+  llvm::Value *Step = llvm::ConstantInt::get(CGF.Int32Ty, 1);
+  if (const auto *Expression = dyn_cast_or_null<Expr>(FS->getInc())) {
+    
+    switch (Expression->getStmtClass()) {
+      case clang::Stmt::UnaryOperatorClass: { /* i++. ++i, ++i, --i*/
+        auto unOp = clang::cast<clang::UnaryOperator>(Expression);
+        switch(unOp->getOpcode()) {
+          case UO_PreInc:
+          case UO_PostInc:
+            Step = llvm::ConstantInt::get(CGF.Int32Ty, 1);
+            break;
+          case UO_PreDec:
+          case UO_PostDec:
+            Step = llvm::ConstantInt::get(CGF.Int32Ty, -1);
+            break;
+          default:
+            break;
+        }
+        break;
+      }
+      case clang::Stmt::BinaryOperatorClass: { /* i = i + 1 */
+        auto BinOp = clang::cast<clang::BinaryOperator>(Expression);
+        if (BinOp->getOpcode() == clang::BO_Assign) {
+          /* i = i + 1 */
+          // FIXME: I am being lazy and not handling this yet. I do though....
+        }
+        break;
+      }
+      case clang::Stmt::CompoundAssignOperatorClass: {
+        auto *CompOp = clang::cast<clang::CompoundAssignOperator>(Expression);
+        auto *RHS = CGF.EmitScalarExpr(CompOp->getRHS());
+        RHS = CGF.Builder.CreateIntCast(RHS, CGF.Int32Ty, true);
+
+        if (CompOp->getOpcode() == clang::BO_AddAssign) {
+          Step = RHS;  
+        } 
+        else if (CompOp->getOpcode() == clang::BO_SubAssign) {
+          Step = CGF.Builder.CreateNeg(RHS);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  // Get the clauses and the arguments to send to runtime.
+  // graph_id
+  // graph_reset
+  // ifclause
+  // nogroup
+  // loop unroll
+
+  // Get graph_id()
+  llvm::Value *GraphId = llvm::ConstantInt::get(CGM.IntPtrTy, 0);
+  const OMPGraphIdClause *GraphIdClause = D.getSingleClause<OMPGraphIdClause>();
+  if (GraphIdClause) {
+    const auto *E = GraphIdClause->getId();
+    auto *GraphIdVal = CGF.EmitScalarExpr(E);
+    GraphId = CGF.Builder.CreateIntCast(GraphIdVal, CGM.IntPtrTy, /*isSigned=*/false);
+  }
+
+  // Get loop_unroll()
+  // llvm::Value *LoopUnroll = llvm::ConstantInt::get(CGM.IntPtrTy, 0);
+  // const OMPLoopUnrollClause *LoopUnrollClause = D.getSingleClause<OMPLoopUnrollClause>();
+  // if (LoopUnrollClause) {
+  //   const auto *E = LoopUnrollClause->getNum();
+  //   auto *LoopUnrollVal = CGF.EmitScalarExpr(E);
+  //   LoopUnroll = CGF.Builder.CreateIntCast(LoopUnrollVal, CGM.IntPtrTy, /*isSigned=*/false);
+  // }
+
+  // Extract UB from `i < n` (BinaryOperator, RHS = n).
+  llvm::Value *UB = nullptr;
+  // Returns the loop condition expression as an Expr.  
+  if (const auto *Cond = dyn_cast_or_null<BinaryOperator>(FS->getCond())) {
+    UB = CGF.EmitScalarExpr(Cond->getRHS());
+    UB = CGF.Builder.CreateIntCast(UB, CGF.Int32Ty, /*isSigned=*/true);
+  }
+
+  // Creates a new code generator
+  CodeGenFunction OutlinedCGF(CGM, /*suppressNewContext=*/true);
+
+  // Retrieves the code inside the directive as a captured statement.
+  // This is used to package a block of code and track every local variable from the surrounding scope.
+
+  // Define how to generate the body:
+  // 1) Mark it as within the taskgraphloop region
+  // 2) Translate it to LLVM IR
+  auto BodyGen = [CS](CodeGenFunction &CGF, PrePostActionTy &) {
+    CodeGenFunction::OMPWithinTaskgraphloopRAII WithinTaskgraphloop(CGF);
+    CGF.EmitStmt(CS->getCapturedStmt());
+  };
+
+  // Pack shared variables into a struct
+  // Since the outlined code is in its own function, it looses access to the local stack,
+  // so all variables references within the region need to be packed to be passed to the 
+  // function. 
+  LValue CapStruct = CGF.InitCapturedStruct(*CS);
+  CGOpenMPTaskgraphloopRegionInfo TaskgraphloopRegion(*CS, BodyGen);
+  CodeGenFunction::CGCapturedStmtRAII CapInfoRAII(OutlinedCGF,
+                                                  &TaskgraphloopRegion);
+
+  // The actual outlining. Takes the captured statement and emits an LLVM IR function.
+  llvm::Function *OutlinedFn = OutlinedCGF.GenerateCapturedStmtFunction(*CS);
+                                                
+  // Package all arguments to runtime in an array
+  std::array<llvm::Value*, 6> Args {
+    CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(OutlinedFn,CGM.VoidPtrTy),
+    CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(CapStruct.getPointer(OutlinedCGF), CGM.VoidPtrTy),
+    GraphId,
+    LB,       /* lower bound */
+    UB,       /* upper bound */
+    Step,     /* step */
+  }; 
+
+  // Emit a call to the XKOMP runtime with necessary arguments
+  CGF.EmitRuntimeCall(OMPBuilder.getOrCreateRuntimeFunction(
+      CGM.getModule(), OMPRTL_xkomp_taskgraphloop),
+      Args
+  );
 }
 
 void CGOpenMPRuntime::emitTaskgroupRegion(CodeGenFunction &CGF,
@@ -14410,6 +14591,14 @@ void CGOpenMPSIMDRuntime::emitMaskedRegion(CodeGenFunction &CGF,
 
 void CGOpenMPSIMDRuntime::emitTaskyieldCall(CodeGenFunction &CGF,
                                             SourceLocation Loc) {
+  llvm_unreachable("Not supported in SIMD-only mode");
+}
+
+void CGOpenMPSIMDRuntime::emitTaskgraphloopRegion(
+    CodeGenFunction &CGF,
+    const OMPTaskgraphloopDirective &D,
+    const RegionCodeGenTy &TaskgraphloopOpGen,
+    SourceLocation Loc) {
   llvm_unreachable("Not supported in SIMD-only mode");
 }
 

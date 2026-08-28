@@ -2329,6 +2329,14 @@ void OMPClauseEnqueue::VisitOMPClauseWithPostUpdate(
   Visitor->AddStmt(C->getPostUpdateExpr());
 }
 
+void OMPClauseEnqueue::VisitOMPGraphIdClause(const OMPGraphIdClause *C) {
+  Visitor->AddStmt(C->getId());
+}
+
+void OMPClauseEnqueue::VisitOMPLoopUnrollClause(const OMPLoopUnrollClause *C) {
+  Visitor->AddStmt(C->getNum());
+}
+
 void OMPClauseEnqueue::VisitOMPIfClause(const OMPIfClause *C) {
   VisitOMPClauseWithPreInit(C);
   Visitor->AddStmt(C->getCondition());

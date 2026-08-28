@@ -848,6 +848,14 @@ public:
   virtual void emitErrorCall(CodeGenFunction &CGF, SourceLocation Loc, Expr *ME,
                              bool IsFatal);
 
+  /// Emit a taskgraphloop region.
+  /// \param taskgraphloopOpGen Generator for the statement associated with the
+  /// given taskgraphloop region.
+  virtual void emitTaskgraphloopRegion(CodeGenFunction &CGF,
+                                       const OMPTaskgraphloopDirective &D,
+                                       const RegionCodeGenTy &TaskgraphloopOpGen,
+                                       SourceLocation Loc);
+  
   /// Emit a taskgroup region.
   /// \param TaskgroupOpGen Generator for the statement associated with the
   /// given taskgroup region.
@@ -1855,6 +1863,14 @@ public:
 
   /// Emits code for a taskyield directive.
   void emitTaskyieldCall(CodeGenFunction &CGF, SourceLocation Loc) override;
+
+  /// Emit a taskgraphloop region.
+  /// \param TaskgraphloopOpGen Generator for the statement associated with the
+  /// given taskgraphloop region.
+  void emitTaskgraphloopRegion(CodeGenFunction &CGF,
+                               const OMPTaskgraphloopDirective &D,
+                               const RegionCodeGenTy &TaskgraphloopOpGen,
+                               SourceLocation Loc) override;
 
   /// Emit a taskgroup region.
   /// \param TaskgroupOpGen Generator for the statement associated with the

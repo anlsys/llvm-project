@@ -2737,6 +2737,12 @@ void ASTStmtWriter::VisitOMPErrorDirective(OMPErrorDirective *D) {
   Code = serialization::STMT_OMP_ERROR_DIRECTIVE;
 }
 
+void ASTStmtWriter::VisitOMPTaskgraphloopDirective(OMPTaskgraphloopDirective *D) {
+  VisitStmt(D);
+  VisitOMPExecutableDirective(D);
+  Code = serialization::STMT_OMP_TASKGRAPHLOOP_DIRECTIVE;
+}
+
 void ASTStmtWriter::VisitOMPTaskgroupDirective(OMPTaskgroupDirective *D) {
   VisitStmt(D);
   VisitOMPExecutableDirective(D);

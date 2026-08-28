@@ -4828,6 +4828,62 @@ public:
   }
 };
 
+/// This represents the 'graph_id' clause.
+///
+/// \code 
+/// #pragma omp taskgraphloop graph_id(0)
+/// \endcode 
+///
+class OMPGraphIdClause final 
+    : public OMPOneStmtClause<llvm::omp::OMPC_graph_id, OMPClause> {
+  friend class OMPClauseReader;
+
+  /// Set condition.
+  void setId(Expr *Id) { setStmt(Id); }
+
+public:
+  /// Build 'graph_id' clause with identifier value \a Id.
+  ///
+  /// \param Id Id value for the clause.
+  /// \param StartLoc Starting location of the clause.
+  /// \param LParenLoc Location of '('.
+  /// \param EndLoc Ending location of the clause.
+  OMPGraphIdClause(Expr *Id, SourceLocation StartLoc, SourceLocation LParenLoc,
+                   SourceLocation EndLoc)
+      : OMPOneStmtClause(Id, StartLoc, LParenLoc, EndLoc) {}
+
+  /// Build an empty clause.
+  OMPGraphIdClause() : OMPOneStmtClause() {}
+
+  /// Returns condition.
+  Expr *getId() const { return getStmtAs<Expr>(); }
+};
+
+/// This represents the 'loop_unroll' clause.
+///
+/// \code 
+/// #pragma omp taskgraphloop loop_unroll([int])
+/// \endcode 
+///
+class OMPLoopUnrollClause final 
+    : public OMPOneStmtClause<llvm::omp::OMPC_loop_unroll, OMPClause> {
+  friend class OMPClauseReader;
+
+  /// Set condition.
+  void setNum(Expr *Num) { setStmt(Num); }
+
+public:
+  OMPLoopUnrollClause(Expr *Num, SourceLocation StartLoc, SourceLocation LParenLoc,
+                   SourceLocation EndLoc)
+      : OMPOneStmtClause(Num, StartLoc, LParenLoc, EndLoc) {}
+
+  /// Build an empty clause.
+  OMPLoopUnrollClause() : OMPOneStmtClause() {}
+
+  /// Returns condition.
+  Expr *getNum() const { return getStmtAs<Expr>(); }
+};
+
 /// This represents clause 'linear' in the '#pragma omp ...'
 /// directives.
 ///

@@ -551,6 +551,35 @@ public:
     ~CGCapturedStmtRAII() { CGF.CapturedStmtInfo = PrevCapturedStmtInfo; }
   };
 
+  bool OMPWithinTaskgraphloop = false;
+  bool getOMPWithinTaskgraphloop() { return OMPWithinTaskgraphloop; }
+  void setOMPWithinTaskgraphloop(bool In) { OMPWithinTaskgraphloop = In; }
+
+  /// RAII for correct setting/restoring of Taskgraphloop region.
+  class CGCapturedTaskgraphloopRAII {
+  private:
+    CodeGenFunction &CGF;
+    CGCapturedStmtInfo *PrevCapturedStmtInfo;
+
+  public:
+    CGCapturedTaskgraphloopRAII(CodeGenFunction &CGF,
+                       CGCapturedStmtInfo *NewCapturedStmtInfo)
+        : CGF(CGF), PrevCapturedStmtInfo(CGF.CapturedStmtInfo) {
+      CGF.CapturedStmtInfo = NewCapturedStmtInfo;
+    }
+    ~CGCapturedTaskgraphloopRAII() { CGF.CapturedStmtInfo = PrevCapturedStmtInfo; }
+  };
+
+  class OMPWithinTaskgraphloopRAII {
+    CodeGenFunction &CGF;
+
+  public:
+    OMPWithinTaskgraphloopRAII(CodeGenFunction &CGF_) : CGF(CGF_) {
+      CGF.setOMPWithinTaskgraphloop(true);
+    }
+    ~OMPWithinTaskgraphloopRAII() { CGF.setOMPWithinTaskgraphloop(false); }
+  };
+
   /// An abstract representation of regular/ObjC call/message targets.
   class AbstractCallee {
     /// The function declaration of the callee.
@@ -3955,6 +3984,7 @@ public:
   void EmitOMPErrorDirective(const OMPErrorDirective &S);
   void EmitOMPBarrierDirective(const OMPBarrierDirective &S);
   void EmitOMPTaskwaitDirective(const OMPTaskwaitDirective &S);
+  void EmitOMPTaskgraphloopDirective(const OMPTaskgraphloopDirective &S);
   void EmitOMPTaskgroupDirective(const OMPTaskgroupDirective &S);
   void EmitOMPFlushDirective(const OMPFlushDirective &S);
   void EmitOMPDepobjDirective(const OMPDepobjDirective &S);

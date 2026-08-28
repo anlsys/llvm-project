@@ -571,6 +571,12 @@ public:
   StmtResult ActOnOpenMPTaskgroupDirective(ArrayRef<OMPClause *> Clauses,
                                            Stmt *AStmt, SourceLocation StartLoc,
                                            SourceLocation EndLoc);
+
+  /// Called on well-formed '\#pragma omp taskgraphloop'.
+  StmtResult ActOnOpenMPTaskgraphloopDirective(ArrayRef<OMPClause *> Clauses,
+                                               Stmt *AStmt, SourceLocation StartLoc,
+                                               SourceLocation EndLoc);
+
   /// Called on well-formed '\#pragma omp flush'.
   StmtResult ActOnOpenMPFlushDirective(ArrayRef<OMPClause *> Clauses,
                                        SourceLocation StartLoc,
@@ -874,6 +880,16 @@ public:
 
   /// Called on device_num selector in context selectors.
   void ActOnOpenMPDeviceNum(Expr *DeviceNumExpr);
+
+  OMPClause *ActOnOpenMPGraphIdClause(Expr* id,
+                                      SourceLocation StartLoc,
+                                      SourceLocation LParenLoc,
+                                      SourceLocation EndLoc);
+
+  OMPClause *ActOnOpenMPLoopUnrollClause(Expr* Num,
+                                         SourceLocation StartLoc,
+                                         SourceLocation LParenLoc,
+                                         SourceLocation EndLoc);
 
   OMPClause *ActOnOpenMPSingleExprClause(OpenMPClauseKind Kind, Expr *Expr,
                                          SourceLocation StartLoc,

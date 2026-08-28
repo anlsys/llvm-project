@@ -919,6 +919,14 @@ void OMPClauseProfiler::VisitOMPGrainsizeClause(const OMPGrainsizeClause *C) {
   if (C->getGrainsize())
     Profiler->VisitStmt(C->getGrainsize());
 }
+void OMPClauseProfiler::VisitOMPGraphIdClause(const OMPGraphIdClause *C) {
+  if (C->getId())
+    Profiler->VisitStmt(C->getId());
+}
+void OMPClauseProfiler::VisitOMPLoopUnrollClause(const OMPLoopUnrollClause *C) {
+  if (C->getNum())
+    Profiler->VisitStmt(C->getNum());
+}
 void OMPClauseProfiler::VisitOMPNumTasksClause(const OMPNumTasksClause *C) {
   VisitOMPClauseWithPreInit(C);
   if (C->getNumTasks())
@@ -1151,9 +1159,14 @@ void StmtProfiler::VisitOMPAssumeDirective(const OMPAssumeDirective *S) {
   VisitOMPExecutableDirective(S);
 }
 
+void StmtProfiler::VisitOMPTaskgraphloopDirective(const OMPTaskgraphloopDirective *S) {
+  VisitOMPExecutableDirective(S);
+}
+
 void StmtProfiler::VisitOMPErrorDirective(const OMPErrorDirective *S) {
   VisitOMPExecutableDirective(S);
 }
+
 void StmtProfiler::VisitOMPTaskgroupDirective(const OMPTaskgroupDirective *S) {
   VisitOMPExecutableDirective(S);
   if (const Expr *E = S->getReductionRef())
