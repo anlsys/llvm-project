@@ -543,9 +543,6 @@ __xktgt_target_kernel_launch(
     // prepareArgs
     KernelLaunchParamsTy LaunchParams = GenericKernel.prepareArgs(GenericDevice, ArgPtrs, ArgOffsets, KernelArgs->NumArgs, Args, Ptrs, KernelLaunchEnvironment, KernelArgs->Version);
 
-    // shared memory for cuda
-    // const unsigned int sharedmemory = KernelArgs->DynCGroupMem;
-
     uint32_t NumThreads[3] = {KernelArgs->UserThreadLimit[0], KernelArgs->UserThreadLimit[1], KernelArgs->UserThreadLimit[2]};
     uint32_t NumBlocks[3] = {KernelArgs->UserNumBlocks[0], KernelArgs->UserNumBlocks[1], KernelArgs->UserNumBlocks[2]};
     if (!GenericKernel.isBareMode())
@@ -614,6 +611,11 @@ __xktgt_target_kernel_launch(
         cmd->prog.block.x                     = NumThreads[0];
         cmd->prog.block.y                     = NumThreads[1];
         cmd->prog.block.z                     = NumThreads[2];
+        // Dynamic shared memory the region asked for (`ompx_dyn_cgroup_mem`, or a
+        // reduction/`declare target` allocation the compiler sized). A launch
+        // parameter like grid/block, so it is recorded with them; the driver may
+        // raise it (never lower it) to hold the program to its recorded occupancy.
+        cmd->prog.dyn_shmem                   = KernelArgs->DynCGroupMem;
     };
 
     // if no wait, emit a command (e.g., with an event and increasing detach counter)
