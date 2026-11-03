@@ -29,6 +29,11 @@
 
 #include <algorithm>
 #include <cassert>
+
+// XKRT allocator hooks (defined in libomptarget/xktarget.cpp, linked into the
+// same library): device memory goes through XKRT's allocator when it can.
+bool __xktgt_data_alloc(int32_t DeviceId, int64_t Size, int32_t Kind, void **OutPtr);
+bool __xktgt_data_delete(int32_t DeviceId, void *Ptr, int32_t Kind);
 #include <climits>
 #include <cstdint>
 #include <cstdio>
@@ -53,6 +58,8 @@ llvm::omp::target::plugin::DeviceImageTy *
 __ol_tgt_GetDeviceImageFromProgram(ol_program_handle_t Program);
 llvm::omp::target::plugin::PluginContextTy *
 __ol_tgt_GetPluginContext(ol_context_handle_t Context);
+llvm::omp::target::plugin::GenericKernelTy *
+__ol_tgt_GetKernelFromSymbol(ol_symbol_handle_t Symbol);
 } // namespace llvm::offload::tmp
 
 int HostDataToTargetTy::addEventIfNecessary(DeviceTy &Device,
@@ -424,6 +431,11 @@ void *DeviceTy::allocData(int64_t Size, void *HstPtr, int32_t Kind) {
                     DeviceID, HstPtr, &TargetPtr, Size,
                     /*CodePtr=*/OMPT_GET_RETURN_ADDRESS);)
 
+  // Redirect device-memory allocation to the (fast) XKRT allocator when it can
+  // handle it; otherwise fall back to the plugin allocator.
+  if (__xktgt_data_alloc(DeviceID, Size, Kind, &TargetPtr))
+    return TargetPtr;
+
   auto *PluginCtx = getPluginContext();
   if (!PluginCtx) {
     REPORT() << "Failure to allocate device memory: device " << DeviceID
@@ -451,6 +463,11 @@ int32_t DeviceTy::deleteData(void *TgtAllocBegin, int32_t Kind) {
                     RegionInterface.getCallbacks<ompt_target_data_delete>(),
                     DeviceID, TgtAllocBegin,
                     /*CodePtr=*/OMPT_GET_RETURN_ADDRESS);)
+
+  // Free XKRT-allocated device memory through XKRT; fall back to the plugin for
+  // anything not tracked by the XKRT allocator.
+  if (__xktgt_data_delete(DeviceID, TgtAllocBegin, Kind))
+    return OFFLOAD_SUCCESS;
 
   auto *PluginCtx = getPluginContext();
   if (!PluginCtx) {
@@ -772,8 +789,18 @@ prepareBlockMemory(DeviceTy &Device, const KernelLaunchInfoTy &KernelEnv,
                            DynFallbackPtr};
 }
 
+/// Allocations backing a launch that must outlive it, when the launch is
+/// prepared for a runtime that replays it (see DeviceTy::prepareKernelLaunch):
+/// collected for the caller instead of being freed after synchronization.
+static thread_local llvm::SmallVectorImpl<void *> *KeepLaunchAllocations =
+    nullptr;
+
 static void freeAfterSynchronization(DeviceTy &Device, AsyncInfoTy &AsyncInfo,
                                      void *Ptr) {
+  if (KeepLaunchAllocations) {
+    KeepLaunchAllocations->push_back(Ptr);
+    return;
+  }
   AsyncInfo.addPostProcessingFunction([&Device, Ptr]() -> int {
     if (auto Err = Device.freeCtxMem(Ptr)) {
       REPORT() << "Failure to free device memory " << Ptr << ": "
@@ -1397,6 +1424,62 @@ int32_t DeviceTy::launchKernel(void *TgtEntryPtr, void **TgtVarsPtr,
     }
   }
 
+  return OFFLOAD_SUCCESS;
+}
+
+int32_t DeviceTy::prepareKernelLaunch(void *TgtEntryPtr, void **TgtVarsPtr,
+                                      ptrdiff_t *TgtOffsets,
+                                      KernelArgsTy &KernelArgs,
+                                      PreparedKernelLaunchTy &Launch,
+                                      AsyncInfoTy &AsyncInfo) {
+  auto *Kernel = llvm::offload::tmp::__ol_tgt_GetKernelFromSymbol(
+      static_cast<ol_symbol_handle_t>(TgtEntryPtr));
+  if (!Kernel) {
+    REPORT() << "Failure to prepare kernel " << TgtEntryPtr
+             << ": not a kernel symbol";
+    return OFFLOAD_FAIL;
+  }
+  auto NativeOrErr = Kernel->getNativeHandle();
+  if (!NativeOrErr) {
+    REPORT() << "Failure to prepare kernel " << TgtEntryPtr << ": "
+             << toString(NativeOrErr.takeError());
+    return OFFLOAD_FAIL;
+  }
+  Launch.NativeKernel = *NativeOrErr;
+  Launch.Info = getKernelLaunchInfo(TgtEntryPtr);
+
+  // Same steps as launchKernel(), up to the launch itself.
+  LaunchConfigTy Config = buildLaunchConfig(KernelArgs);
+  checkLaunchInvariants(Config, KernelArgs, Launch.Info);
+  adjustEffectiveGeometry(GeometryProps, Config, KernelArgs, Launch.Info);
+
+  void **DynPtrSlot =
+      resolveArgsAndDynPtrSlot(KernelArgs, TgtVarsPtr, TgtOffsets, Launch.Args,
+                               Launch.Ptrs, Launch.ArgSizes, Config);
+
+  auto DynCGroupMemFallback = static_cast<DynCGroupMemFallbackType>(
+      KernelArgs.Flags.DynCGroupMemFallback);
+  KeepLaunchAllocations = &Launch.Allocations;
+  llvm::Error Err = prepareDynamicLaunchState(
+      *this, KernelArgs.Version, Launch.Info, Config, KernelArgs.DynCGroupMem,
+      DynCGroupMemFallback, DynPtrSlot, AsyncInfo);
+  KeepLaunchAllocations = nullptr;
+  if (Err) {
+    REPORT() << "Failure to prepare launch state for kernel " << TgtEntryPtr
+             << ": " << toString(std::move(Err));
+    return OFFLOAD_FAIL;
+  }
+
+  Launch.NumGroups[0] = Config.Size.NumGroups.x;
+  Launch.NumGroups[1] = Config.Size.NumGroups.y;
+  Launch.NumGroups[2] = Config.Size.NumGroups.z;
+  Launch.GroupSize[0] = Config.Size.GroupSize.x;
+  Launch.GroupSize[1] = Config.Size.GroupSize.y;
+  Launch.GroupSize[2] = Config.Size.GroupSize.z;
+  Launch.DynSharedMemory = uint32_t(Config.Size.DynSharedMemory);
+  Launch.Cooperative = Config.Cooperative;
+  Launch.NumArgs = Config.NumArgs;
+  Launch.KernelParams = Config.Args;
   return OFFLOAD_SUCCESS;
 }
 

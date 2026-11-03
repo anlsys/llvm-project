@@ -1061,6 +1061,27 @@ OMPFlushClause *OMPFlushClause::CreateEmpty(const ASTContext &C, unsigned N) {
   return new (Mem) OMPFlushClause(N);
 }
 
+OMPAccessClause *
+OMPAccessClause::Create(const ASTContext &C, SourceLocation StartLoc,
+                        SourceLocation LParenLoc, SourceLocation EndLoc,
+                        AccessDataTy Data, ArrayRef<Expr *> VL) {
+  void *Mem = C.Allocate(totalSizeToAlloc<Expr *>(VL.size()),
+                         alignof(OMPAccessClause));
+  OMPAccessClause *Clause =
+      new (Mem) OMPAccessClause(StartLoc, LParenLoc, EndLoc, VL.size());
+  Clause->setModifiers(Data.Modifiers);
+  Clause->setModifierLoc(Data.ModifierLoc);
+  Clause->setColonLoc(Data.ColonLoc);
+  Clause->setVarRefs(VL);
+  return Clause;
+}
+
+OMPAccessClause *OMPAccessClause::CreateEmpty(const ASTContext &C, unsigned N) {
+  void *Mem =
+      C.Allocate(totalSizeToAlloc<Expr *>(N), alignof(OMPAccessClause));
+  return new (Mem) OMPAccessClause(N);
+}
+
 OMPDependClause *
 OMPDependClause::Create(const ASTContext &C, SourceLocation StartLoc,
                         SourceLocation LParenLoc, SourceLocation EndLoc,
@@ -2730,6 +2751,30 @@ void OMPClausePrinter::VisitOMPFlushClause(OMPFlushClause *Node) {
 void OMPClausePrinter::VisitOMPDepobjClause(OMPDepobjClause *Node) {
   OS << "(";
   Node->getDepobj()->printPretty(OS, nullptr, Policy, 0);
+  OS << ")";
+}
+
+void OMPClausePrinter::VisitOMPAccessClause(OMPAccessClause *Node) {
+  OS << "access(";
+  unsigned Mods = Node->getModifiers();
+  bool First = true;
+  auto PrintMod = [&](unsigned Flag, const char *Name) {
+    if (Mods & Flag) {
+      if (!First)
+        OS << ", ";
+      OS << Name;
+      First = false;
+    }
+  };
+  PrintMod(OMPC_ACCESS_FLAG_read, "read");
+  PrintMod(OMPC_ACCESS_FLAG_write, "write");
+  PrintMod(OMPC_ACCESS_FLAG_storage, "storage");
+  PrintMod(OMPC_ACCESS_FLAG_nostorage, "nostorage");
+  PrintMod(OMPC_ACCESS_FLAG_noncoherent, "noncoherent");
+  PrintMod(OMPC_ACCESS_FLAG_concurrentwrite, "concurrentwrite");
+  if (!Node->varlist_empty())
+    OS << " :";
+  VisitOMPClauseList(Node, ' ');
   OS << ")";
 }
 

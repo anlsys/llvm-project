@@ -1346,6 +1346,12 @@ public:
   OMPClause *ActOnOpenMPDepobjClause(Expr *Depobj, SourceLocation StartLoc,
                                      SourceLocation LParenLoc,
                                      SourceLocation EndLoc);
+  /// Called on well-formed 'access' clause.
+  OMPClause *ActOnOpenMPAccessClause(const OMPAccessClause::AccessDataTy &Data,
+                                     ArrayRef<Expr *> VarList,
+                                     SourceLocation StartLoc,
+                                     SourceLocation LParenLoc,
+                                     SourceLocation EndLoc);
   /// Called on well-formed 'depend' clause.
   OMPClause *ActOnOpenMPDependClause(const OMPDependClause::DependDataTy &Data,
                                      Expr *DepModifier,

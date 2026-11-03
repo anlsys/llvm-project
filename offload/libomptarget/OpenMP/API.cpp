@@ -51,6 +51,31 @@ void *targetLockExplicit(void *HostPtr, size_t Size, int DeviceNum,
                          const char *Name);
 void targetUnlockExplicit(void *HostPtr, int DeviceNum, const char *Name);
 
+// Implemented in libomp, they are called from within __tgt_* functions.
+extern "C" {
+int __kmpc_get_target_offload(void) __attribute__((weak));
+kmp_task_t *__kmpc_omp_task_alloc(ident_t *loc_ref, int32_t gtid, int32_t flags,
+                                  size_t sizeof_kmp_task_t,
+                                  size_t sizeof_shareds,
+                                  kmp_routine_entry_t task_entry)
+    __attribute__((weak));
+
+kmp_task_t *
+__kmpc_omp_target_task_alloc(ident_t *loc_ref, int32_t gtid, int32_t flags,
+                             size_t sizeof_kmp_task_t, size_t sizeof_shareds,
+                             kmp_routine_entry_t task_entry, int64_t device_id)
+    __attribute__((weak));
+
+int32_t __kmpc_omp_task_with_deps(ident_t *loc_ref, int32_t gtid,
+                                  kmp_task_t *new_task, int32_t ndeps,
+                                  kmp_depend_info_t *dep_list,
+                                  int32_t ndeps_noalias,
+                                  kmp_depend_info_t *noalias_dep_list)
+    __attribute__((weak));
+
+}
+
+# if 0
 EXTERN int omp_get_num_devices(void) {
   TIMESCOPE();
   OMPT_IF_BUILT(ReturnAddressSetterRAII RA(__builtin_return_address(0)));
@@ -135,6 +160,7 @@ EXTERN int omp_get_initial_device(void) {
   ODBG(ODT_Interface) << "Call to " << __func__ << " returning " << HostDevice;
   return HostDevice;
 }
+# endif
 
 EXTERN size_t omp_get_gprivate_limit(int DeviceNum, omp_access_t AccessGroup) {
   TIMESCOPE();
@@ -516,6 +542,7 @@ EXTERN void *omp_target_memset_async(void *Ptr, int ByteVal, size_t NumBytes,
   return Ptr;
 }
 
+# if 0
 EXTERN int omp_target_memcpy_async(void *Dst, const void *Src, size_t Length,
                                    size_t DstOffset, size_t SrcOffset,
                                    int DstDevice, int SrcDevice,
@@ -544,6 +571,7 @@ EXTERN int omp_target_memcpy_async(void *Dst, const void *Src, size_t Length,
   ODBG(ODT_Interface) << __func__ << " returns " << Rc;
   return Rc;
 }
+# endif
 
 EXTERN int
 omp_target_memcpy_rect(void *Dst, const void *Src, size_t ElementSize,

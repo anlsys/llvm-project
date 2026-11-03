@@ -86,6 +86,9 @@ enum tgt_map_type : uint64_t {
   // instead of preserving the original pointer's value. Currently only
   // useful in conjunction with RETURN_PARAM.
   OMP_TGT_MAPTYPE_FB_NULLIFY = 0x8000,
+  // entry corresponds to an 'access' clause expression, resolved via
+  // xkomp_access_pointer(idx) at runtime
+  OMP_TGT_MAPTYPE_ACCESS = 0x10000,
   // descriptor for non-contiguous target-update
   OMP_TGT_MAPTYPE_NON_CONTIG = 0x100000000000,
   // member of struct, member given by [16 MSBs] - 1

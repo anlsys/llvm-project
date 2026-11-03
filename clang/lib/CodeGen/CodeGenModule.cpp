@@ -2087,6 +2087,10 @@ void CodeGenModule::Release() {
       ErrnoTBAAMD->addOperand(StructTagNode);
     }
   }
+
+  // Serialize forwarded task/kernel IR closures last, once the module is
+  // complete (EmitDeferred + OpenMP finalization done). See ForwardedTaskIR.
+  finalizeForwardedTaskIR();
 }
 
 void CodeGenModule::EmitOpenCLMetadata() {

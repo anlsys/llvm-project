@@ -112,6 +112,13 @@ struct OMPTaskDataTy final {
         : DepKind(DepKind), IteratorExpr(IteratorExpr) {}
   };
   SmallVector<DependData, 4> Dependences;
+  struct AccessData {
+    unsigned Modifiers = 0;
+    SmallVector<const Expr *, 4> AccExprs;
+    explicit AccessData() = default;
+    explicit AccessData(unsigned Modifiers) : Modifiers(Modifiers) {}
+  };
+  SmallVector<AccessData, 4> Accesses;
   llvm::PointerIntPair<llvm::Value *, 1, bool> Final;
   llvm::PointerIntPair<llvm::Value *, 1, bool> Schedule;
   llvm::PointerIntPair<llvm::Value *, 1, bool> Priority;
@@ -460,6 +467,12 @@ protected:
   ///    } flags;
   /// } kmp_depend_info_t;
   QualType KmpDependInfoTy;
+  /// Type typedef struct kmp_access_info {
+  ///    kmp_intptr_t base_addr;
+  ///    size_t       len;
+  ///    unsigned     flags;
+  /// } kmp_access_info_t;
+  QualType KmpAccessInfoTy;
   /// Type typedef struct kmp_task_affinity_info {
   ///    kmp_intptr_t base_addr;
   ///    size_t len;
@@ -551,6 +564,8 @@ protected:
 
   struct TaskResultTy {
     llvm::Value *NewTask = nullptr;
+    // The task's ahead-of-time routine, the standard libomp proxy
+    // kmp_int32 .omp_task_entry.(kmp_int32 gtid, kmp_task_t *tt).
     llvm::Function *TaskEntry = nullptr;
     llvm::Value *NewTaskNewTaskTTy = nullptr;
     LValue TDBase;
@@ -579,10 +594,13 @@ protected:
   /// TaskFunction.
   /// \param Data Additional data for task generation like tiednsee, final
   /// state, list of privates etc.
+  /// \param IfCond The `if` clause condition, if any: when it evaluates to
+  /// false the task is created UNDEFERRED (a tasking-flags bit is set).
   TaskResultTy emitTaskInit(CodeGenFunction &CGF, SourceLocation Loc,
                             const OMPExecutableDirective &D,
                             llvm::Function *TaskFunction, QualType SharedsTy,
-                            Address Shareds, const OMPTaskDataTy &Data);
+                            Address Shareds, const OMPTaskDataTy &Data,
+                            const Expr *IfCond = nullptr);
 
   /// Emit update for lastprivate conditional data.
   void emitLastprivateConditionalUpdate(CodeGenFunction &CGF, LValue IVLVal,
@@ -1690,6 +1708,14 @@ public:
   std::pair<llvm::Value *, Address>
   emitDependClause(CodeGenFunction &CGF,
                    ArrayRef<OMPTaskDataTy::DependData> Dependencies,
+                   SourceLocation Loc);
+
+  /// Emits list of access entries based on the provided data (array of
+  /// access modifier/expression pairs).
+  /// \returns Pointer to the first element of the array casted to VoidPtr type.
+  std::pair<llvm::Value *, Address>
+  emitAccessClause(CodeGenFunction &CGF,
+                   ArrayRef<OMPTaskDataTy::AccessData> Accesses,
                    SourceLocation Loc);
 
   /// Emits list of dependecies based on the provided data (array of

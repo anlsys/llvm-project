@@ -5399,6 +5399,15 @@ public:
 };
 } // anonymous namespace
 
+static void buildAccesses(const OMPExecutableDirective &S,
+                          OMPTaskDataTy &Data) {
+  for (const auto *C : S.getClausesOfKind<OMPAccessClause>()) {
+    OMPTaskDataTy::AccessData &AD =
+        Data.Accesses.emplace_back(C->getModifiers());
+    AD.AccExprs.append(C->varlist_begin(), C->varlist_end());
+  }
+}
+
 static void buildDependences(const OMPExecutableDirective &S,
                              OMPTaskDataTy &Data) {
 
@@ -5536,6 +5545,8 @@ void CodeGenFunction::EmitOMPTaskBasedDirective(
       *this, S.getBeginLoc(), LHSs, RHSs, Data);
   // Build list of dependences.
   buildDependences(S, Data);
+  // Build list of accesses.
+  buildAccesses(S, Data);
   // Get list of local vars for untied tasks.
   if (!Data.Tied) {
     CheckVarsEscapingUntiedTaskDeclContext Checker;
@@ -5951,6 +5962,74 @@ void CodeGenFunction::EmitOMPTargetTaskBasedDirective(
   }
   (void)TargetScope.Privatize();
   buildDependences(S, Data);
+  buildAccesses(S, Data);
+
+  // Reorder Data.Accesses to match the capture order of the target region's
+  // CapturedStmt. This is critical because at runtime, xkomp_access_pointer(idx)
+  // returns device pointers indexed by the acs_list[] order (which is built from
+  // Data.Accesses), while the runtime iterates CombinedInfo entries (which are
+  // in capture order) and increments AccessIdx for each ACCESS-flagged entry.
+  // If these orders differ, the wrong device pointer gets assigned to the wrong
+  // kernel argument.
+  if (!Data.Accesses.empty() &&
+      isOpenMPTargetExecutionDirective(S.getDirectiveKind())) {
+    // Get the target captured statement to determine capture order.
+    const CapturedStmt *TargetCS = S.getCapturedStmt(OMPD_target);
+    if (TargetCS) {
+      // Flatten all access expressions with their modifiers.
+      struct FlatAccess {
+        const Expr *E;
+        unsigned Modifiers;
+      };
+      SmallVector<FlatAccess, 8> FlatList;
+      for (const auto &AD : Data.Accesses)
+        for (const Expr *E : AD.AccExprs)
+          FlatList.push_back({E, AD.Modifiers});
+
+      // Build a map from canonical VarDecl to flat access entries.
+      // A variable may appear multiple times with different modifiers.
+      llvm::DenseMap<const Decl *, SmallVector<FlatAccess, 2>> VarToAccesses;
+      for (const auto &FA : FlatList) {
+        const Expr *Base = FA.E->IgnoreParenImpCasts();
+        while (const auto *ASE = dyn_cast<ArraySectionExpr>(Base))
+          Base = ASE->getBase()->IgnoreParenImpCasts();
+        while (const auto *ASE = dyn_cast<ArraySubscriptExpr>(Base))
+          Base = ASE->getBase()->IgnoreParenImpCasts();
+        if (const auto *DRE = dyn_cast<DeclRefExpr>(Base))
+          VarToAccesses[DRE->getDecl()->getCanonicalDecl()].push_back(FA);
+      }
+
+      // Walk captures in order and collect access entries in capture order.
+      SmallVector<FlatAccess, 8> Reordered;
+      for (CapturedStmt::const_capture_iterator CI = TargetCS->capture_begin(),
+                                      CE = TargetCS->capture_end(); CI != CE; ++CI) {
+        if (CI->capturesVariableArrayType() || CI->capturesThis())
+          continue;
+        const Decl *CanonDecl = CI->getCapturedVar()->getCanonicalDecl();
+        auto It = VarToAccesses.find(CanonDecl);
+        if (It != VarToAccesses.end()) {
+          for (const auto &FA : It->second)
+            Reordered.push_back(FA);
+          VarToAccesses.erase(It);
+        }
+      }
+
+      // Append any remaining access entries not found in captures (shouldn't
+      // happen if variables are properly captured, but be safe).
+      for (auto &KV : VarToAccesses)
+        for (const auto &FA : KV.second)
+          Reordered.push_back(FA);
+
+      // Rebuild Data.Accesses from the reordered flat list — one AccessData
+      // per expression to preserve per-expression modifiers.
+      Data.Accesses.clear();
+      for (const auto &FA : Reordered) {
+        auto &AD = Data.Accesses.emplace_back(FA.Modifiers);
+        AD.AccExprs.push_back(FA.E);
+      }
+    }
+  }
+
   OpenMPDirectiveKind EKind = getEffectiveDirectiveKind(S);
   auto &&CodeGen = [&Data, &S, CS, &BodyGen, BPVD, PVD, SVD, MVD, EKind,
                     &InputInfo](CodeGenFunction &CGF, PrePostActionTy &Action) {
@@ -6171,6 +6250,8 @@ void CodeGenFunction::EmitOMPTaskwaitDirective(const OMPTaskwaitDirective &S) {
   OMPTaskDataTy Data;
   // Build list of dependences
   buildDependences(S, Data);
+  // Build list of accesses
+  buildAccesses(S, Data);
   Data.HasNowaitClause = S.hasClausesOfKind<OMPNowaitClause>();
   CGM.getOpenMPRuntime().emitTaskwaitCall(*this, S.getBeginLoc(), Data);
 }

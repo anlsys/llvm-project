@@ -1,7 +1,16 @@
 message(STATUS "Building offloading runtime library libomptarget.")
 
-if(NOT TARGET "omp")
-  message(FATAL_ERROR "Error: omp target dependency of libomptarget not found. Please ensure 'openmp' is on LLVM_ENABLE_RUNTIMES list.")
+###############
+# C++ version #
+###############
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)  # Optional: disables compiler-specific extensions
+
+if(LIBOMP_STANDALONE)
+  set(LIBOMP ${LIBOMP_STANDALONE})
+else()
+  set(LIBOMP omp)
 endif()
 
 add_library(omptarget SHARED
@@ -9,6 +18,8 @@ add_library(omptarget SHARED
   omptarget.cpp
   OffloadRTL.cpp
   LegacyAPI.cpp
+
+  xktarget.cpp
 
   OpenMP/API.cpp
   OpenMP/InteropAPI.cpp
@@ -34,6 +45,10 @@ target_include_directories(omptarget PRIVATE
 if(LLVM_HAVE_LINK_VERSION_SCRIPT)
   target_link_libraries(omptarget PRIVATE "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/exports")
 endif()
+
+find_package(XKRT  REQUIRED NO_MODULE)
+find_package(XKOMP REQUIRED NO_MODULE)
+target_link_libraries(omptarget PRIVATE XKRT::xkrt XKOMP::xkomp)
 
 # Define the TARGET_NAME and DEBUG_PREFIX.
 target_compile_definitions(omptarget PRIVATE

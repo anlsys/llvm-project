@@ -884,6 +884,11 @@ struct AMDGPUKernelTy : public GenericKernelTy {
   /// Indicates whether or not we need to set up our own private segment size.
   bool usesDynamicStack() const { return DynamicStack; }
 
+  /// The kernel object (code descriptor address) of this kernel.
+  Expected<void *> getNativeHandle() const override {
+    return reinterpret_cast<void *>(KernelObject);
+  }
+
 private:
   /// The kernel object to execute.
   uint64_t KernelObject;

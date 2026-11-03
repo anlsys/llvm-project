@@ -1709,6 +1709,12 @@ RecordReplayTy *__ol_tgt_GetRecordReplay(ol_device_impl_t *Device) {
   return Device->Device->getRecordReplay();
 }
 
+GenericKernelTy *__ol_tgt_GetKernelFromSymbol(ol_symbol_handle_t Symbol) {
+  if (!Symbol || Symbol->Kind != OL_SYMBOL_KIND_KERNEL)
+    return nullptr;
+  return std::get<GenericKernelTy *>(Symbol->PluginImpl);
+}
+
 } // namespace tmp
 
 } // namespace offload

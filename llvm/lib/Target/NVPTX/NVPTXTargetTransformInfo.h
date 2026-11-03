@@ -122,6 +122,12 @@ public:
   getInstructionCost(const User *U, ArrayRef<const Value *> Operands,
                      TTI::TargetCostKind CostKind) const override;
 
+  InstructionCost
+  getIntrinsicInstrCost(const IntrinsicCostAttributes &ICA,
+                        TTI::TargetCostKind CostKind) const override;
+
+  static unsigned getNVPTXExpensiveFPCost(Type *Ty);
+
   InstructionCost getArithmeticInstrCost(
       unsigned Opcode, Type *Ty, TTI::TargetCostKind CostKind,
       TTI::OperandValueInfo Op1Info = {TTI::OK_AnyValue, TTI::OP_None},

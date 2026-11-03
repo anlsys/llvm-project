@@ -5860,6 +5860,147 @@ public:
   }
 };
 
+/// This represents the 'access' clause for the '#pragma omp task',
+/// '#pragma omp taskwait', and '#pragma omp target' directives.
+///
+/// \code
+/// #pragma omp task access(write: x[0:n])
+/// \endcode
+/// In this example directive '#pragma omp task' with clause 'access' with
+/// modifier 'write' and array section 'x[0:n]'.
+class OMPAccessClause final
+    : public OMPVarListClause<OMPAccessClause>,
+      private llvm::TrailingObjects<OMPAccessClause, Expr *> {
+  friend class OMPClauseReader;
+  friend OMPVarListClause;
+  friend TrailingObjects;
+
+public:
+  struct AccessDataTy final {
+    /// Bitmask of OpenMPAccessModifierFlag values (read, write, storage,
+    /// noncoherent, nostorage, concurrentwrite). Multiple modifiers can be combined.
+    unsigned Modifiers = 0;
+
+    /// Location of the first modifier keyword.
+    SourceLocation ModifierLoc;
+
+    /// Colon location.
+    SourceLocation ColonLoc;
+  };
+
+private:
+  /// Access modifier and source locations.
+  AccessDataTy Data;
+
+  /// Build clause with number of variables \a N.
+  ///
+  /// \param StartLoc Starting location of the clause.
+  /// \param LParenLoc Location of '('.
+  /// \param EndLoc Ending location of the clause.
+  /// \param N Number of the variables in the clause.
+  OMPAccessClause(SourceLocation StartLoc, SourceLocation LParenLoc,
+                  SourceLocation EndLoc, unsigned N)
+      : OMPVarListClause<OMPAccessClause>(llvm::omp::OMPC_access, StartLoc,
+                                          LParenLoc, EndLoc, N) {}
+
+  /// Build an empty clause.
+  ///
+  /// \param N Number of variables.
+  explicit OMPAccessClause(unsigned N)
+      : OMPVarListClause<OMPAccessClause>(llvm::omp::OMPC_access,
+                                          SourceLocation(), SourceLocation(),
+                                          SourceLocation(), N) {}
+
+  /// Set access modifiers bitmask.
+  void setModifiers(unsigned M) { Data.Modifiers = M; }
+
+  /// Set modifier location.
+  void setModifierLoc(SourceLocation Loc) { Data.ModifierLoc = Loc; }
+
+  /// Set colon location.
+  void setColonLoc(SourceLocation Loc) { Data.ColonLoc = Loc; }
+
+public:
+  /// Creates clause with a list of variables \a VL.
+  ///
+  /// \param C AST context.
+  /// \param StartLoc Starting location of the clause.
+  /// \param LParenLoc Location of '('.
+  /// \param EndLoc Ending location of the clause.
+  /// \param Data Access modifier and source locations.
+  /// \param VL List of references to the variables (array sections).
+  static OMPAccessClause *Create(const ASTContext &C, SourceLocation StartLoc,
+                                 SourceLocation LParenLoc,
+                                 SourceLocation EndLoc, AccessDataTy Data,
+                                 ArrayRef<Expr *> VL);
+
+  /// Creates an empty clause with \a N variables.
+  ///
+  /// \param C AST context.
+  /// \param N The number of variables.
+  static OMPAccessClause *CreateEmpty(const ASTContext &C, unsigned N);
+
+  /// Get access modifiers bitmask.
+  unsigned getModifiers() const { return Data.Modifiers; }
+
+  /// Whether the 'noncoherent' modifier is present.
+  bool isNoncoherent() const {
+    return Data.Modifiers & OMPC_ACCESS_FLAG_noncoherent;
+  }
+
+  /// Whether the 'concurrentwrite' modifier is present.
+  bool isConcurrentWrite() const {
+    return Data.Modifiers & OMPC_ACCESS_FLAG_concurrentwrite;
+  }
+
+  /// Whether the 'nostorage' modifier is present.
+  bool hasNoStorage() const {
+    return Data.Modifiers & OMPC_ACCESS_FLAG_nostorage;
+  }
+
+  /// Whether the 'read' modifier is present.
+  bool hasRead() const {
+    return Data.Modifiers & OMPC_ACCESS_FLAG_read;
+  }
+
+  /// Whether the 'write' modifier is present.
+  bool hasWrite() const {
+    return Data.Modifiers & OMPC_ACCESS_FLAG_write;
+  }
+
+  /// Whether the 'storage' modifier is present.
+  bool hasStorage() const {
+    return Data.Modifiers & OMPC_ACCESS_FLAG_storage;
+  }
+
+  /// Get access modifier location.
+  SourceLocation getModifierLoc() const { return Data.ModifierLoc; }
+
+  /// Get colon location.
+  SourceLocation getColonLoc() const { return Data.ColonLoc; }
+
+  child_range children() {
+    return child_range(reinterpret_cast<Stmt **>(varlist_begin()),
+                       reinterpret_cast<Stmt **>(varlist_end()));
+  }
+
+  const_child_range children() const {
+    auto Children = const_cast<OMPAccessClause *>(this)->children();
+    return const_child_range(Children.begin(), Children.end());
+  }
+
+  child_range used_children() {
+    return child_range(child_iterator(), child_iterator());
+  }
+  const_child_range used_children() const {
+    return const_child_range(const_child_iterator(), const_child_iterator());
+  }
+
+  static bool classof(const OMPClause *T) {
+    return T->getClauseKind() == llvm::omp::OMPC_access;
+  }
+};
+
 /// This represents implicit clause 'depend' for the '#pragma omp task'
 /// directive.
 ///

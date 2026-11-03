@@ -449,6 +449,14 @@ struct GenericKernelTy {
     return false;
   }
 
+  /// Return the backend-native handle of this kernel (e.g. the CUfunction),
+  /// reinterpreted as a void pointer. Lets a runtime that issues launches on
+  /// its own queues (XKOMP/XKRT) launch the kernel directly.
+  virtual Expected<void *> getNativeHandle() const {
+    return Plugin::error(error::ErrorCode::UNSUPPORTED,
+                         "%s not supported by platform", __func__);
+  }
+
 protected:
   /// Prints generic kernel launch information.
   Error printLaunchInfo(GenericDeviceTy &GenericDevice,

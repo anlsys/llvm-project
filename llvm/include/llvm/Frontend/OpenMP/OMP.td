@@ -37,6 +37,9 @@ def OMPC_Absent : Clause<[Spelling<"absent">]> {
   let clangClass = "OMPAbsentClause";
   let flangClass = "OmpAbsentClause";
 }
+def OMPC_Access : Clause<[Spelling<"access">]> {
+  let clangClass = "OMPAccessClause";
+}
 def OMPC_Acquire : Clause<[Spelling<"acquire">]> {
   let clangClass = "OMPAcquireClause";
 }
@@ -1266,6 +1269,7 @@ def OMP_Single : Directive<[Spelling<"single">]> {
 }
 def OMP_Target : Directive<[Spelling<"target">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
     VersionedClause<OMPC_DynGroupprivate, 61>,
@@ -1295,6 +1299,7 @@ def OMP_Target : Directive<[Spelling<"target">]> {
 def OMP_TargetData : Directive<[Spelling<"target data", 1, 52>,
                                 Spelling<"target_data", 60>]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_If>,
   ];
   let allowedOnceClauses = [
@@ -1313,6 +1318,7 @@ def OMP_TargetData : Directive<[Spelling<"target data", 1, 52>,
 def OMP_TargetEnterData : Directive<[Spelling<"target enter data", 1, 52>,
                                      Spelling<"target_enter_data", 60>]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Depend>,
     VersionedClause<OMPC_If>,
   ];
@@ -1330,6 +1336,7 @@ def OMP_TargetEnterData : Directive<[Spelling<"target enter data", 1, 52>,
 def OMP_TargetExitData : Directive<[Spelling<"target exit data", 1, 52>,
                                     Spelling<"target_exit_data", 60>]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Depend>,
     VersionedClause<OMPC_If>,
   ];
@@ -1347,6 +1354,7 @@ def OMP_TargetExitData : Directive<[Spelling<"target exit data", 1, 52>,
 def OMP_TargetUpdate : Directive<[Spelling<"target update", 1, 52>,
                                   Spelling<"target_update", 60>]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Depend>,
     VersionedClause<OMPC_From>,
     VersionedClause<OMPC_If>,
@@ -1362,6 +1370,7 @@ def OMP_TargetUpdate : Directive<[Spelling<"target update", 1, 52>,
 }
 def OMP_Task : Directive<[Spelling<"task">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Affinity, 50>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
@@ -1446,6 +1455,7 @@ def OMP_TaskLoop : Directive<[Spelling<"taskloop">]> {
 }
 def OMP_TaskWait : Directive<[Spelling<"taskwait">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Depend, 50>,
   ];
   let allowedOnceClauses = [
@@ -1771,6 +1781,7 @@ def OMP_ForSimd : Directive<[Spelling<"for simd">]> {
 }
 def OMP_target_loop : Directive<[Spelling<"target loop">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
     VersionedClause<OMPC_DynGroupprivate, 61>,
@@ -2283,6 +2294,7 @@ def OMP_ParallelWorkshare : Directive<[Spelling<"parallel workshare">]> {
 }
 def OMP_TargetParallel : Directive<[Spelling<"target parallel">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
     VersionedClause<OMPC_DynGroupprivate, 61>,
@@ -2314,6 +2326,7 @@ def OMP_TargetParallel : Directive<[Spelling<"target parallel">]> {
 }
 def OMP_TargetParallelDo : Directive<[Spelling<"target parallel do">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Depend>,
     VersionedClause<OMPC_DynGroupprivate, 61>,
     VersionedClause<OMPC_FirstPrivate>,
@@ -2350,6 +2363,7 @@ def OMP_TargetParallelDo : Directive<[Spelling<"target parallel do">]> {
 def OMP_TargetParallelDoSimd
     : Directive<[Spelling<"target parallel do simd">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Aligned>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
@@ -2389,6 +2403,7 @@ def OMP_TargetParallelDoSimd
 }
 def OMP_TargetParallelFor : Directive<[Spelling<"target parallel for">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
     VersionedClause<OMPC_DynGroupprivate, 61>,
@@ -2428,6 +2443,7 @@ def OMP_TargetParallelFor : Directive<[Spelling<"target parallel for">]> {
 def OMP_TargetParallelForSimd
     : Directive<[Spelling<"target parallel for simd">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Aligned>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
@@ -2470,6 +2486,7 @@ def OMP_TargetParallelForSimd
 }
 def OMP_target_parallel_loop : Directive<[Spelling<"target parallel loop">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
     VersionedClause<OMPC_DynGroupprivate, 61>,
@@ -2505,6 +2522,7 @@ def OMP_target_parallel_loop : Directive<[Spelling<"target parallel loop">]> {
 }
 def OMP_TargetSimd : Directive<[Spelling<"target simd">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Aligned>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
@@ -2544,6 +2562,7 @@ def OMP_TargetSimd : Directive<[Spelling<"target simd">]> {
 }
 def OMP_TargetTeams : Directive<[Spelling<"target teams">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
     VersionedClause<OMPC_DynGroupprivate, 61>,
@@ -2574,6 +2593,7 @@ def OMP_TargetTeams : Directive<[Spelling<"target teams">]> {
 def OMP_TargetTeamsDistribute
     : Directive<[Spelling<"target teams distribute">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
     VersionedClause<OMPC_DynGroupprivate, 61>,
@@ -2607,6 +2627,7 @@ def OMP_TargetTeamsDistribute
 def OMP_TargetTeamsDistributeParallelDo
     : Directive<[Spelling<"target teams distribute parallel do">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
     VersionedClause<OMPC_DynGroupprivate, 61>,
@@ -2646,6 +2667,7 @@ def OMP_TargetTeamsDistributeParallelDo
 def OMP_TargetTeamsDistributeParallelDoSimd
     : Directive<[Spelling<"target teams distribute parallel do simd">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Aligned>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
@@ -2689,6 +2711,7 @@ def OMP_TargetTeamsDistributeParallelDoSimd
 def OMP_TargetTeamsDistributeParallelFor
     : Directive<[Spelling<"target teams distribute parallel for">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
     VersionedClause<OMPC_DynGroupprivate, 61>,
@@ -2729,6 +2752,7 @@ def OMP_TargetTeamsDistributeParallelFor
 def OMP_TargetTeamsDistributeParallelForSimd
     : Directive<[Spelling<"target teams distribute parallel for simd">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Aligned>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
@@ -2774,6 +2798,7 @@ def OMP_TargetTeamsDistributeParallelForSimd
 def OMP_TargetTeamsDistributeSimd
     : Directive<[Spelling<"target teams distribute simd">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Aligned>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
@@ -2840,6 +2865,7 @@ def OMP_TargetTeamsWorkdistribute : Directive<[Spelling<"target teams workdistri
 }
 def OMP_target_teams_loop : Directive<[Spelling<"target teams loop">]> {
   let allowedClauses = [
+    VersionedClause<OMPC_Access>,
     VersionedClause<OMPC_Allocate, 50>,
     VersionedClause<OMPC_Depend>,
     VersionedClause<OMPC_DynGroupprivate, 61>,

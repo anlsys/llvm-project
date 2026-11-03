@@ -509,6 +509,30 @@ NVPTXTTIImpl::getInstructionCost(const User *U,
   return BaseT::getInstructionCost(U, Operands, CostKind);
 }
 
+// Cost of an IEEE-compliant f32/f64 division or square root: a multi-
+// instruction refinement sequence with a slow-path call (see the callers).
+unsigned NVPTXTTIImpl::getNVPTXExpensiveFPCost(Type *Ty) {
+  return Ty->getScalarType()->isDoubleTy()
+             ? 4 * TargetTransformInfo::TCC_Expensive
+             : 2 * TargetTransformInfo::TCC_Expensive;
+}
+
+InstructionCost
+NVPTXTTIImpl::getIntrinsicInstrCost(const IntrinsicCostAttributes &ICA,
+                                    TTI::TargetCostKind CostKind) const {
+  if (ICA.getID() == Intrinsic::sqrt) {
+    Type *Ty = ICA.getReturnType();
+    const auto *I = dyn_cast_or_null<Instruction>(ICA.getInst());
+    // As for FDIV: only an approximate f32 square root is one instruction.
+    if (Ty->getScalarType()->isDoubleTy() ||
+        (Ty->getScalarType()->isFloatTy() && !(I && I->hasApproxFunc())))
+      return getTypeLegalizationCost(Ty).first * getNVPTXExpensiveFPCost(Ty) *
+             (Ty->isVectorTy() ? cast<FixedVectorType>(Ty)->getNumElements()
+                               : 1);
+  }
+  return BaseT::getIntrinsicInstrCost(ICA, CostKind);
+}
+
 InstructionCost NVPTXTTIImpl::getArithmeticInstrCost(
     unsigned Opcode, Type *Ty, TTI::TargetCostKind CostKind,
     TTI::OperandValueInfo Op1Info, TTI::OperandValueInfo Op2Info,
@@ -520,6 +544,22 @@ InstructionCost NVPTXTTIImpl::getArithmeticInstrCost(
 
   switch (ISD) {
   default:
+    return BaseT::getArithmeticInstrCost(Opcode, Ty, CostKind, Op1Info,
+                                         Op2Info);
+  case ISD::FDIV:
+  case ISD::FREM:
+    // An IEEE-compliant division is not one instruction on NVPTX: it is a
+    // reciprocal approximation refined by Newton iterations, plus a call to a
+    // slow path for special operands (f64, and f32 unless approximation is
+    // allowed). Costing it like an fmul lets SimplifyCFG speculate it out of
+    // conditional blocks for free -- and nothing turns the select back into a
+    // branch on this target -- so every thread pays for a division that only
+    // a few needed.
+    if (Ty->getScalarType()->isDoubleTy() ||
+        (Ty->getScalarType()->isFloatTy() &&
+         !(CxtI && (CxtI->hasAllowReciprocal() || CxtI->hasApproxFunc()))))
+      return LT.first * getNVPTXExpensiveFPCost(Ty) *
+             (Ty->isVectorTy() ? cast<FixedVectorType>(Ty)->getNumElements() : 1);
     return BaseT::getArithmeticInstrCost(Opcode, Ty, CostKind, Op1Info,
                                          Op2Info);
   case ISD::ADD:

@@ -3581,6 +3581,7 @@ OMPClause *Parser::ParseOpenMPClause(OpenMPDirectiveKind DKind,
   case OMPC_reduction:
   case OMPC_task_reduction:
   case OMPC_in_reduction:
+  case OMPC_access:
   case OMPC_linear:
   case OMPC_aligned:
   case OMPC_copyin:
@@ -5187,6 +5188,43 @@ bool Parser::ParseOpenMPVarList(
     if (!InvalidReductionId)
       Data.ReductionOrMapperId =
           Actions.GetNameFromUnqualifiedId(UnqualifiedReductionId);
+  } else if (Kind == OMPC_access) {
+    // Handle comma-separated access modifiers: modifier [, modifier]* : exprs
+    // where modifier is one of: read, write, storage, nostorage, noncoherent, concurrentwrite
+    ColonProtectionRAIIObject ColonRAII(*this);
+    unsigned ModifierFlags = 0;
+    Data.ExtraModifierLoc = Tok.getLocation();
+    bool ParsedAny = false;
+    while (Tok.is(tok::identifier)) {
+      auto Mod = static_cast<OpenMPAccessClauseModifier>(
+          getOpenMPSimpleClauseType(
+              Kind, PP.getSpelling(Tok), getLangOpts()));
+      if (Mod == OMPC_ACCESS_unknown)
+        break;
+      ModifierFlags |= getAccessModifierFlag(Mod);
+      ParsedAny = true;
+      ConsumeToken();
+      if (Tok.is(tok::comma)) {
+        ConsumeToken();
+      } else {
+        // No comma means we expect the colon next.
+        break;
+      }
+    }
+    Data.ExtraModifier = static_cast<int>(ModifierFlags);
+    if (!ParsedAny) {
+      Diag(Tok, diag::err_omp_unexpected_clause_value)
+          << "'read', 'write', 'storage', 'nostorage', 'noncoherent' or 'concurrentwrite'"
+          << getOpenMPClauseName(OMPC_access);
+      SkipUntil(tok::colon, tok::r_paren, tok::annot_pragma_openmp_end,
+                StopBeforeMatch);
+    }
+    if (Tok.is(tok::colon)) {
+      Data.ColonLoc = ConsumeToken();
+    } else {
+      Diag(Tok, diag::warn_pragma_expected_colon)
+          << "access modifier";
+    }
   } else if (Kind == OMPC_depend || Kind == OMPC_doacross) {
     if (getLangOpts().OpenMP >= 50) {
       if (Tok.is(tok::identifier) && PP.getSpelling(Tok) == "iterator") {

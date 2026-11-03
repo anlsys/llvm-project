@@ -540,6 +540,15 @@ NVPTXTargetLowering::NVPTXTargetLowering(const NVPTXTargetMachine &TM,
   // condition branches.
   setJumpIsExpensive(true);
 
+  // Let CodeGenPrepare turn a select back into a branch when one of its
+  // operands is expensive to compute and used only on that side (e.g. an f64
+  // division or square root SimplifyCFG speculated out of an `if`). SimplifyCFG
+  // speculates one expensive instruction per diamond precisely because it
+  // counts on that undo; without this flag it never happens on NVPTX and every
+  // thread executes both sides. Profile-driven conversions do not apply: there
+  // is no branch profile for device code.
+  PredictableSelectIsExpensive = true;
+
   // Wide divides are _very_ slow. Try to reduce the width of the divide if
   // possible.
   addBypassSlowDiv(64, 32);

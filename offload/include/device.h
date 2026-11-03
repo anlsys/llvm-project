@@ -112,6 +112,33 @@ struct DeviceGeometryPropsTy {
   ol_platform_backend_t Backend = OL_PLATFORM_BACKEND_UNKNOWN;
 };
 
+/// A kernel launch prepared but not issued, for a runtime that issues it on
+/// its own queues and may replay it (XKOMP/XKRT): the launch geometry, the
+/// flattened arguments (dyn_ptr filled in), and the backend-native kernel.
+/// Filled in place by DeviceTy::prepareKernelLaunch -- KernelParams points
+/// into Ptrs, which points into Args, so the object must not be moved or
+/// copied while they are in use.
+struct PreparedKernelLaunchTy {
+  KernelLaunchInfoTy Info;
+  /// Backend-native kernel handle (a CUfunction for CUDA).
+  void *NativeKernel = nullptr;
+  uint32_t NumGroups[3] = {0, 0, 0};
+  uint32_t GroupSize[3] = {0, 0, 0};
+  uint32_t DynSharedMemory = 0;
+  bool Cooperative = false;
+  /// NumArgs pointers, each to one argument value (kernelParams).
+  uint32_t NumArgs = 0;
+  void **KernelParams = nullptr;
+  llvm::SmallVector<void *> Args, Ptrs;
+  llvm::SmallVector<size_t> ArgSizes;
+  /// Device memory backing the launch (kernel launch environment, reduction
+  /// buffer, dynamic block memory fallback). It is NOT freed after the
+  /// launch: the caller owns it and frees it with DeviceTy::freeCtxMem once
+  /// the launch can no longer be issued (e.g. when a recorded graph is
+  /// destroyed).
+  llvm::SmallVector<void *> Allocations;
+};
+
 struct PluginManager;
 
 struct DeviceTy {
@@ -341,6 +368,14 @@ struct DeviceTy {
   uint64_t getMaxBlockSharedMemSize() const {
     return GeometryProps.MaxBlockSharedMemSize;
   }
+
+  /// Prepare a launch of the kernel at TgtEntryPtr like launchKernel() does
+  /// -- effective geometry, flattened arguments, kernel launch environment --
+  /// without issuing it. See PreparedKernelLaunchTy.
+  int32_t prepareKernelLaunch(void *TgtEntryPtr, void **TgtVarsPtr,
+                              ptrdiff_t *TgtOffsets, KernelArgsTy &KernelArgs,
+                              PreparedKernelLaunchTy &Launch,
+                              AsyncInfoTy &AsyncInfo);
 
   /// Record the launch-geometry properties for the kernel at \p KernelPtr,
   /// read once at registration time from its "<name>_kernel_environment"

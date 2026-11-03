@@ -39,6 +39,11 @@
 #include <vector>
 
 using llvm::SmallVector;
+
+/// External function provided by the xkomp runtime.
+/// Given the index of an access clause expression on a target construct,
+/// returns the corresponding device pointer.
+extern "C" void *xkomp_access_pointer(int idx);
 #ifdef OMPT_SUPPORT
 using namespace llvm::omp::target::ompt;
 #endif
@@ -475,8 +480,11 @@ int targetDataBegin(ident_t *Loc, DeviceTy &Device, int32_t ArgNum,
   // process each input.
   for (int32_t I = 0; I < ArgNum; ++I) {
     // Ignore private variables and arrays - there is no mapping for them.
+    // Ignore xkomp access-clause entries too: their device pointer is resolved
+    // via xkomp_access_pointer(), not the host-to-device mapping table.
     if ((ArgTypes[I] & OMP_TGT_MAPTYPE_LITERAL) ||
-        (ArgTypes[I] & OMP_TGT_MAPTYPE_PRIVATE))
+        (ArgTypes[I] & OMP_TGT_MAPTYPE_PRIVATE) ||
+        (ArgTypes[I] & OMP_TGT_MAPTYPE_ACCESS))
       continue;
     TIMESCOPE_WITH_DETAILS_AND_IDENT(
         "HostToDev", "Size=" + std::to_string(ArgSizes[I]) + "B", Loc);
@@ -1032,8 +1040,10 @@ int targetDataEnd(ident_t *Loc, DeviceTy &Device, int32_t ArgNum,
   for (int32_t I = ArgNum - 1; I >= 0; --I) {
     // Ignore private variables and arrays - there is no mapping for them.
     // Also, ignore the use_device_ptr directive, it has no effect here.
+    // Ignore xkomp access-clause entries: not tracked in the mapping table.
     if ((ArgTypes[I] & OMP_TGT_MAPTYPE_LITERAL) ||
-        (ArgTypes[I] & OMP_TGT_MAPTYPE_PRIVATE))
+        (ArgTypes[I] & OMP_TGT_MAPTYPE_PRIVATE) ||
+        (ArgTypes[I] & OMP_TGT_MAPTYPE_ACCESS))
       continue;
 
     // Ignore ATTACH entries - they should only be honored on map-entering
@@ -1577,7 +1587,6 @@ static bool isLambdaMapping(int64_t Mapping) {
   return (Mapping & LambdaMapping) == LambdaMapping;
 }
 
-namespace {
 /// Find the table information in the map or look it up in the translation
 /// tables.
 TableMap *getTableMap(void *HostPtr) {
@@ -2014,7 +2023,7 @@ public:
 /// Process data before launching the kernel, including calling targetDataBegin
 /// to map and transfer data to target device, transferring (first-)private
 /// variables.
-static int processDataBefore(ident_t *Loc, int64_t DeviceId, void *HostPtr,
+int processDataBefore(ident_t *Loc, int64_t DeviceId, void *HostPtr,
                              int32_t ArgNum, void **ArgBases, void **Args,
                              int64_t *ArgSizes, int64_t *ArgTypes,
                              map_var_info_t *ArgNames, void **ArgMappers,
@@ -2051,6 +2060,7 @@ static int processDataBefore(ident_t *Loc, int64_t DeviceId, void *HostPtr,
   // List of (first-)private arrays allocated for this target region
   SmallVector<int> TgtArgsPositions(ArgNum, -1);
 
+  int AccessIdx = 0; // running index for access clause expressions
   for (int32_t I = 0; I < ArgNum; ++I) {
     if (!(ArgTypes[I] & OMP_TGT_MAPTYPE_TARGET_PARAM)) {
       // This is not a target parameter, do not push it into TgtArgs.
@@ -2107,9 +2117,14 @@ static int processDataBefore(ident_t *Loc, int64_t DeviceId, void *HostPtr,
     map_var_info_t HstPtrName = (!ArgNames) ? nullptr : ArgNames[I];
     ptrdiff_t TgtBaseOffset;
     TargetPointerResultTy TPR;
-    if (ArgTypes[I] & OMP_TGT_MAPTYPE_LITERAL) {
-      ODBG(ODT_Mapping) << "Forwarding first-private value " << HstPtrBase
-                        << " to the target construct";
+    if (ArgTypes[I] & OMP_TGT_MAPTYPE_ACCESS) {
+      // Access clause entry: resolve via xkomp_access_pointer(idx) instead
+      // of the standard host-to-device mapping lookup.
+      TgtPtrBegin = xkomp_access_pointer(AccessIdx++);
+      TgtBaseOffset = (intptr_t)HstPtrBase - (intptr_t)HstPtrBegin;
+    } else if (ArgTypes[I] & OMP_TGT_MAPTYPE_LITERAL) {
+        ODBG(ODT_Mapping) << "Forwarding first-private value " << HstPtrBase
+            << " to the target construct";
       TgtPtrBegin = HstPtrBase;
       TgtBaseOffset = 0;
     } else if (ArgTypes[I] & OMP_TGT_MAPTYPE_PRIVATE) {
@@ -2237,7 +2252,6 @@ static int processDataAfter(ident_t *Loc, int64_t DeviceId, void *HostPtr,
 
   return OFFLOAD_SUCCESS;
 }
-} // namespace
 
 /// performs the same actions as data_begin in case arg_num is
 /// non-zero and initiates run of the offloaded region on the target platform;

@@ -97,6 +97,11 @@ struct CUDAKernelTy : public GenericKernelTy {
   /// Create a CUDA kernel with a name and an execution mode.
   CUDAKernelTy(StringRef Name) : GenericKernelTy(Name), Func(nullptr) {}
 
+  /// The CUfunction of this kernel.
+  Expected<void *> getNativeHandle() const override {
+    return reinterpret_cast<void *>(Func);
+  }
+
   /// Initialize the CUDA kernel.
   Error initImpl(GenericDeviceTy &GenericDevice,
                  DeviceImageTy &Image) override {

@@ -18,6 +18,7 @@
 #include "OpenMP/omp.h"
 #include "omptarget.h"
 #include "private.h"
+#include "xktarget.h"
 
 #include "Shared/EnvironmentVar.h"
 #include "Shared/Profile.h"
@@ -257,12 +258,16 @@ EXTERN void __tgt_target_data_update_mapper(ident_t *Loc, int64_t DeviceId,
                                             int64_t *ArgTypes,
                                             map_var_info_t *ArgNames,
                                             void **ArgMappers) {
+  # if 0
   OMPT_IF_BUILT(ReturnAddressSetterRAII RA(__builtin_return_address(0)));
   targetData<AsyncInfoTy>(
       Loc, DeviceId, ArgNum, ArgsBase, Args, ArgSizes, ArgTypes, ArgNames,
       ArgMappers, targetDataUpdate,
       "Updating data within the OpenMP data region with update_mapper",
       "update");
+  # else
+  return __xktgt_target_data_update_mapper(Loc, DeviceId, ArgNum, ArgsBase, Args, ArgSizes, ArgTypes, ArgNames, ArgMappers);
+  # endif
 }
 
 EXTERN void __tgt_target_data_update_nowait_mapper(
@@ -270,16 +275,19 @@ EXTERN void __tgt_target_data_update_nowait_mapper(
     void **Args, int64_t *ArgSizes, int64_t *ArgTypes, map_var_info_t *ArgNames,
     void **ArgMappers, int32_t DepNum, void *DepList, int32_t NoAliasDepNum,
     void *NoAliasDepList) {
+
+    # if 0
   OMPT_IF_BUILT(ReturnAddressSetterRAII RA(__builtin_return_address(0)));
   targetData<TaskAsyncInfoWrapperTy>(
       Loc, DeviceId, ArgNum, ArgsBase, Args, ArgSizes, ArgTypes, ArgNames,
       ArgMappers, targetDataUpdate,
       "Updating data within the OpenMP data region with update_nowait_mapper",
       "update");
+  # else
+  return __xktgt_target_data_update_nowait_mapper(Loc, DeviceId, ArgNum, ArgsBase, Args, ArgSizes, ArgTypes, ArgNames, ArgMappers, DepNum, DepList, NoAliasDepNum, NoAliasDepList);
+  # endif
 }
 
-/// Holds dynamically allocated argument arrays when upgrading old-format
-/// kernel arguments to include the dyn_ptr slot.
 struct UpgradedArgBuffersTy {
   llvm::SmallVector<void *, 0> BasePtrs;
   llvm::SmallVector<void *, 0> Ptrs;
@@ -289,7 +297,9 @@ struct UpgradedArgBuffersTy {
   llvm::SmallVector<void *, 0> Mappers;
 };
 
-static KernelArgsTy *upgradeKernelArgs(KernelArgsTy *KernelArgs,
+/// Holds dynamically allocated argument arrays when upgrading old-format
+/// kernel arguments to include the dyn_ptr slot.
+KernelArgsTy *upgradeKernelArgs(KernelArgsTy *KernelArgs,
                                        KernelArgsTy &LocalKernelArgs,
                                        UpgradedArgBuffersTy &Bufs,
                                        int32_t NumTeams, int32_t ThreadLimit) {
@@ -469,10 +479,19 @@ EXTERN int __tgt_target_kernel(ident_t *Loc, int64_t DeviceId, int32_t NumTeams,
                                KernelArgsTy *KernelArgs) {
   OMPT_IF_BUILT(ReturnAddressSetterRAII RA(__builtin_return_address(0)));
   if (KernelArgs->Flags.NoWait)
+  {
+    # if 0
     return targetKernel<TaskAsyncInfoWrapperTy>(
         Loc, DeviceId, NumTeams, ThreadLimit, HostPtr, KernelArgs);
+    # else
+    return __xktgt_target_kernel_nowait(Loc, DeviceId, NumTeams, ThreadLimit, HostPtr, KernelArgs);
+    # endif
+  }
+  # if 0
   return targetKernel<AsyncInfoTy>(Loc, DeviceId, NumTeams, ThreadLimit,
                                    HostPtr, KernelArgs);
+  # endif
+  return __xktgt_target_kernel(Loc, DeviceId, NumTeams, ThreadLimit, HostPtr, KernelArgs);
 }
 
 /// Activates the record replay mechanism.

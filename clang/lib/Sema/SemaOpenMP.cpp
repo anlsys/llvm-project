@@ -6856,6 +6856,42 @@ StmtResult SemaOpenMP::ActOnOpenMPExecutableDirective(
           ClausesWithImplicit.emplace_back(Implicit);
       }
     }
+    // Warn about variables used in target regions that are not in any
+    // explicit 'map' or 'access' clause (they will be implicitly mapped).
+    if (isOpenMPTargetExecutionDirective(Kind)) {
+      // Collect base declarations from access clauses.
+      llvm::SmallDenseSet<const ValueDecl *, 8> AccessedVars;
+      for (OMPClause *C : Clauses) {
+        if (auto *AC = dyn_cast<OMPAccessClause>(C)) {
+          for (Expr *E : AC->varlist()) {
+            Expr *Base = E->IgnoreParenImpCasts();
+            while (auto *ASE = dyn_cast<ArraySectionExpr>(Base))
+              Base = ASE->getBase()->IgnoreParenImpCasts();
+            while (auto *ASE = dyn_cast<ArraySubscriptExpr>(Base))
+              Base = ASE->getBase()->IgnoreParenImpCasts();
+            if (auto *DRE = dyn_cast<DeclRefExpr>(Base))
+              AccessedVars.insert(
+                  cast<ValueDecl>(DRE->getDecl()->getCanonicalDecl()));
+          }
+        }
+      }
+      // Warn for each implicitly mapped variable not in an access clause.
+      for (unsigned I = 0; I < VariableImplicitInfo::DefaultmapKindNum; ++I) {
+        for (unsigned J = 0; J < VariableImplicitInfo::MapKindNum; ++J) {
+          for (Expr *E : ImpInfo.Mappings[I][J]) {
+            if (auto *DRE = dyn_cast<DeclRefExpr>(E->IgnoreParenImpCasts())) {
+              const ValueDecl *VD =
+                  cast<ValueDecl>(DRE->getDecl()->getCanonicalDecl());
+              if (!AccessedVars.count(VD)) {
+                Diag(E->getExprLoc(),
+                     diag::warn_omp_variable_not_mapped_or_accessed)
+                    << VD;
+              }
+            }
+          }
+        }
+      }
+    }
     for (unsigned I = 0; I < VariableImplicitInfo::DefaultmapKindNum; ++I) {
       int ClauseKindCnt = -1;
       for (unsigned J = 0; J < VariableImplicitInfo::MapKindNum; ++J) {
@@ -14572,9 +14608,19 @@ StmtResult SemaOpenMP::ActOnOpenMPTargetUpdateDirective(
 
   setBranchProtectedScope(SemaRef, OMPD_target_update, AStmt);
 
-  if (!hasClauses(Clauses, OMPC_to, OMPC_from)) {
-    Diag(StartLoc, diag::err_omp_at_least_one_motion_clause_required);
-    return StmtError();
+  // A 'target update' is valid if it has a 'to' or 'from' clause, or if it
+  // has an 'access' clause with a non-noncoherent 'read' modifier.
+  bool HasMotionClause = hasClauses(Clauses, OMPC_to, OMPC_from);
+  if (!HasMotionClause) {
+    bool HasNonNoncoherentReadAccess = llvm::any_of(Clauses, [](const OMPClause *C) {
+      if (const auto *AC = dyn_cast<OMPAccessClause>(C))
+        return AC->hasRead() && !AC->isNoncoherent();
+      return false;
+    });
+    if (!HasNonNoncoherentReadAccess) {
+      Diag(StartLoc, diag::err_omp_at_least_one_motion_clause_required);
+      return StmtError();
+    }
   }
 
   if (!isClauseMappable(Clauses)) {
@@ -20777,6 +20823,11 @@ OMPClause *SemaOpenMP::ActOnOpenMPVarListClause(OpenMPClauseKind Kind,
   case OMPC_flush:
     Res = ActOnOpenMPFlushClause(VarList, StartLoc, LParenLoc, EndLoc);
     break;
+  case OMPC_access:
+    Res = ActOnOpenMPAccessClause(
+        {static_cast<unsigned>(ExtraModifier), ExtraModifierLoc, ColonLoc},
+        VarList, StartLoc, LParenLoc, EndLoc);
+    break;
   case OMPC_depend:
     assert(0 <= ExtraModifier && ExtraModifier <= OMPC_DEPEND_unknown &&
            "Unexpected depend modifier.");
@@ -23840,6 +23891,76 @@ ProcessOpenMPDoacrossClauseCommon(Sema &SemaRef, bool IsSource,
         << 1 << Stack->getParentLoopControlVariable(VarList.size() + 1);
   }
   return {Vars, OpsOffs, TotalDepCount};
+}
+
+OMPClause *SemaOpenMP::ActOnOpenMPAccessClause(
+    const OMPAccessClause::AccessDataTy &Data, ArrayRef<Expr *> VarList,
+    SourceLocation StartLoc, SourceLocation LParenLoc,
+    SourceLocation EndLoc) {
+  unsigned Mods = Data.Modifiers;
+  SourceLocation ModifierLoc = Data.ModifierLoc;
+
+  // Must have at least one of read, write, storage, nostorage, or
+  // concurrentwrite.
+  if (!(Mods & (OMPC_ACCESS_FLAG_read | OMPC_ACCESS_FLAG_write |
+                OMPC_ACCESS_FLAG_storage | OMPC_ACCESS_FLAG_nostorage |
+                OMPC_ACCESS_FLAG_concurrentwrite))) {
+    Diag(ModifierLoc, diag::err_omp_unexpected_clause_value)
+        << "'read', 'write', 'storage', 'nostorage' or 'concurrentwrite'"
+        << getOpenMPClauseNameForDiag(OMPC_access);
+    return nullptr;
+  }
+
+  // 'noncoherent' can only appear if 'read' or 'write' is also present.
+  if ((Mods & OMPC_ACCESS_FLAG_noncoherent) &&
+      !(Mods & (OMPC_ACCESS_FLAG_read | OMPC_ACCESS_FLAG_write))) {
+    Diag(ModifierLoc, diag::err_omp_unexpected_clause_value)
+        << "'noncoherent' modifier requires 'read' or 'write'"
+        << getOpenMPClauseNameForDiag(OMPC_access);
+    return nullptr;
+  }
+
+  // 'storage' modifier is only allowed on 'target enter data' and
+  // 'target exit data' directives.
+  if (Mods & OMPC_ACCESS_FLAG_storage) {
+    OpenMPDirectiveKind DKind = DSAStack->getCurrentDirective();
+    if (DKind != OMPD_target_enter_data && DKind != OMPD_target_exit_data) {
+      unsigned OMPVersion = SemaRef.getLangOpts().OpenMP;
+      Diag(ModifierLoc, diag::err_omp_unexpected_clause_value)
+          << ("'storage' modifier is not allowed for '#pragma omp " +
+              getOpenMPDirectiveName(DKind, OMPVersion).str() + "'")
+          << getOpenMPClauseNameForDiag(OMPC_access);
+      return nullptr;
+    }
+  }
+
+  SmallVector<Expr *, 8> Vars;
+  for (Expr *RefExpr : VarList) {
+    assert(RefExpr && "NULL expr in OpenMP access clause.");
+    if (isa<DependentScopeDeclRefExpr>(RefExpr)) {
+      // It will be analyzed later.
+      Vars.push_back(RefExpr);
+      continue;
+    }
+
+    SourceLocation ELoc = RefExpr->getExprLoc();
+    Expr *SimpleExpr = RefExpr->IgnoreParenCasts();
+
+    // The expression must be an array section (lvalue).
+    if (!SimpleExpr->isLValue()) {
+      Diag(ELoc, diag::err_omp_expected_addressable_lvalue_or_array_item)
+          << 0 << RefExpr->getSourceRange();
+      continue;
+    }
+
+    Vars.push_back(RefExpr);
+  }
+
+  if (Vars.empty())
+    return nullptr;
+
+  return OMPAccessClause::Create(getASTContext(), StartLoc, LParenLoc, EndLoc,
+                                 Data, Vars);
 }
 
 OMPClause *SemaOpenMP::ActOnOpenMPDependClause(
