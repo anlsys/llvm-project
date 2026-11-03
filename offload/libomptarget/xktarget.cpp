@@ -3,6 +3,7 @@
 # include "device.h"
 # include "omptarget.h"
 # include "PluginManager.h"
+# include "OpenMP/OffloadRTL.h"   // PM
 # include "Shared/APITypes.h"
 # include "xktarget.h"
 
@@ -60,9 +61,10 @@ extern "C" xkrt_device_unique_id_t omp_device_id_to_xkomp(int device_id);
 
 /// Locate the OpenMP NVPTX DeviceRTL bitcode (libomptarget-nvptx.bc) shipped with
 /// this toolchain, so CGIR can link it into a JIT-compiled device kernel and
-/// resolve the device-runtime externs (__kmpc_*). It sits next to this
-/// libomptarget shared object, under the device-triple subdirectory:
-///   <libdir>/nvptx64-nvidia-cuda/libomptarget-nvptx.bc
+/// resolve the device-runtime externs (__kmpc_*). It sits under the
+/// device-triple subdirectory of this libomptarget's library directory:
+///   <libdir>/nvptx64-nvidia-cuda/libomptarget-nvptx.bc, or, with per-triple
+///   runtime directories, <libdir>/../nvptx64-nvidia-cuda/libomptarget-nvptx.bc
 /// Resolved once via dladdr() and cached. Returns NULL if not found (the kernel
 /// then fails at PTX JIT with a clear "unresolved extern" message).
 /// TODO: generalize the triple/filename per plugin (e.g. AMD DeviceRTL) once
@@ -79,10 +81,21 @@ xktgt_device_runtime_bc(void)
             std::string so = info.dli_fname;
             const size_t slash = so.find_last_of('/');
             const std::string libdir = (slash == std::string::npos) ? "." : so.substr(0, slash);
-            const std::string cand = libdir + "/nvptx64-nvidia-cuda/libomptarget-nvptx.bc";
-            struct stat st;
-            if (stat(cand.c_str(), &st) == 0)
-                path = cand;
+            // libomptarget lives in <libdir>, or in the per-triple
+            // <libdir>/<host-triple> (LLVM_ENABLE_PER_TARGET_RUNTIME_DIR, the
+            // default on Linux): try the device-triple directory beside it and
+            // one level up.
+            for (const char * rel : { "/nvptx64-nvidia-cuda/libomptarget-nvptx.bc",
+                                      "/../nvptx64-nvidia-cuda/libomptarget-nvptx.bc" })
+            {
+                const std::string cand = libdir + rel;
+                struct stat st;
+                if (stat(cand.c_str(), &st) == 0)
+                {
+                    path = cand;
+                    break;
+                }
+            }
         }
     });
     return path.empty() ? nullptr : path.c_str();

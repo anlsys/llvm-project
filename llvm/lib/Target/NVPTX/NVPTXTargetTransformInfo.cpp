@@ -557,7 +557,7 @@ InstructionCost NVPTXTTIImpl::getArithmeticInstrCost(
     // a few needed.
     if (Ty->getScalarType()->isDoubleTy() ||
         (Ty->getScalarType()->isFloatTy() &&
-         !(CxtI && (CxtI->hasAllowReciprocal() || CxtI->hasApproxFunc()))))
+         !(CtxI && (CtxI->hasAllowReciprocal() || CtxI->hasApproxFunc()))))
       return LT.first * getNVPTXExpensiveFPCost(Ty) *
              (Ty->isVectorTy() ? cast<FixedVectorType>(Ty)->getNumElements() : 1);
     return BaseT::getArithmeticInstrCost(Opcode, Ty, CostKind, Op1Info,

@@ -30,10 +30,13 @@
 #include <algorithm>
 #include <cassert>
 
-// XKRT allocator hooks (defined in libomptarget/xktarget.cpp, linked into the
-// same library): device memory goes through XKRT's allocator when it can.
-bool __xktgt_data_alloc(int32_t DeviceId, int64_t Size, int32_t Kind, void **OutPtr);
-bool __xktgt_data_delete(int32_t DeviceId, void *Ptr, int32_t Kind);
+// XKRT allocator hooks, defined in libomptarget/xktarget.cpp: device memory
+// goes through XKRT's allocator when it can. Weak, as these sources are also
+// built into libraries without XKRT (e.g. libacctarget), where they are null.
+__attribute__((weak)) bool __xktgt_data_alloc(int32_t DeviceId, int64_t Size,
+                                              int32_t Kind, void **OutPtr);
+__attribute__((weak)) bool __xktgt_data_delete(int32_t DeviceId, void *Ptr,
+                                               int32_t Kind);
 #include <climits>
 #include <cstdint>
 #include <cstdio>
@@ -433,7 +436,7 @@ void *DeviceTy::allocData(int64_t Size, void *HstPtr, int32_t Kind) {
 
   // Redirect device-memory allocation to the (fast) XKRT allocator when it can
   // handle it; otherwise fall back to the plugin allocator.
-  if (__xktgt_data_alloc(DeviceID, Size, Kind, &TargetPtr))
+  if (__xktgt_data_alloc && __xktgt_data_alloc(DeviceID, Size, Kind, &TargetPtr))
     return TargetPtr;
 
   auto *PluginCtx = getPluginContext();
@@ -466,7 +469,7 @@ int32_t DeviceTy::deleteData(void *TgtAllocBegin, int32_t Kind) {
 
   // Free XKRT-allocated device memory through XKRT; fall back to the plugin for
   // anything not tracked by the XKRT allocator.
-  if (__xktgt_data_delete(DeviceID, TgtAllocBegin, Kind))
+  if (__xktgt_data_delete && __xktgt_data_delete(DeviceID, TgtAllocBegin, Kind))
     return OFFLOAD_SUCCESS;
 
   auto *PluginCtx = getPluginContext();

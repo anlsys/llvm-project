@@ -23925,7 +23925,7 @@ OMPClause *SemaOpenMP::ActOnOpenMPAccessClause(
   if (Mods & OMPC_ACCESS_FLAG_storage) {
     OpenMPDirectiveKind DKind = DSAStack->getCurrentDirective();
     if (DKind != OMPD_target_enter_data && DKind != OMPD_target_exit_data) {
-      unsigned OMPVersion = SemaRef.getLangOpts().OpenMP;
+      llvm::omp::Version OMPVersion = SemaRef.getLangOpts().getOpenMPVersion();
       Diag(ModifierLoc, diag::err_omp_unexpected_clause_value)
           << ("'storage' modifier is not allowed for '#pragma omp " +
               getOpenMPDirectiveName(DKind, OMPVersion).str() + "'")

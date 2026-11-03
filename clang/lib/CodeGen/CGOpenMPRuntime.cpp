@@ -4138,7 +4138,7 @@ static void optimizeTaskClosure(llvm::Function *Entry) {
     }
 
     // SROA Entry ONLY (it is complete).
-    llvm::PassBuilder PB;
+    llvm::PassBuilder PB(Entry->getContext());
     llvm::FunctionAnalysisManager FAM;
     PB.registerFunctionAnalyses(FAM);
     llvm::FunctionPassManager FPM;
